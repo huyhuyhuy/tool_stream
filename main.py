@@ -13,17 +13,22 @@ from flask import Flask, Response, render_template_string
 import queue
 import io
 import base64
+import win32gui
+import win32ui
+import pygetwindow as gw
+import dxcam
+import ctypes
 
 class ScreenStreamTool:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("Screen Stream Tool")
-        self.root.geometry("900x430")
+        self.root.title("Stream Tool")
+        self.root.geometry("400x400")
         self.root.configure(bg='#f0f0f0')
         
-        # Biến lưu trữ vùng chọn
-        self.region1 = None
-        self.region2 = None
+        # Biến lưu trữ cửa sổ đã chọn
+        self.selected_window1 = None
+        self.selected_window2 = None
         self.streaming1 = False
         self.streaming2 = False
         
@@ -33,272 +38,241 @@ class ScreenStreamTool:
         self.capture_thread1 = None
         self.capture_thread2 = None
         
+        
         # Flask app
         self.app = Flask(__name__)
         self.setup_flask_routes()
         
-        # MSS object for screen capture - create new instance for each thread
-        self.sct1 = None
-        self.sct2 = None
+        # DXCAM objects for window capture
+        self.camera1 = None
+        self.camera2 = None
+        
+        # Initialize DXCAM
+        try:
+            self.dxcam_camera = dxcam.create()
+            self.status_label = None  # Will be set in setup_ui
+        except Exception as e:
+            print(f"Error initializing DXCAM: {e}")
+            self.dxcam_camera = None
         
         self.setup_ui()
         self.setup_flask_thread()
         
     def setup_ui(self):
-        # Title
-        title_label = tk.Label(self.root, text="Screen Stream Tool", 
-                              font=("Arial", 16, "bold"), bg='#f0f0f0')
-        title_label.pack(pady=10)
-        
-        # Main container với layout ngang
+      
+        # Main container với layout dọc
         main_frame = tk.Frame(self.root, bg='#f0f0f0')
         main_frame.pack(fill='both', expand=True, padx=10, pady=10)
         
-        # Frame cho Region 1 (bên trái)
+        # Frame cho Window 1
         frame1 = tk.Frame(main_frame, bg='#e0e0e0', relief='raised', bd=2)
-        frame1.pack(side='left', fill='both', expand=True, padx=5)
+        frame1.pack(fill='x', pady=5)
         
-        tk.Label(frame1, text="Region 1", font=("Arial", 12, "bold"), bg='#e0e0e0').pack(pady=5)
+        tk.Label(frame1, text="Window 1", font=("Arial", 12, "bold"), bg='#e0e0e0').pack(pady=5)
+        
+        # Window selection frame
+        window_frame1 = tk.Frame(frame1, bg='#e0e0e0')
+        window_frame1.pack(fill='x', pady=5)
+        
+        tk.Label(window_frame1, text="Select Chrome Window:", bg='#e0e0e0', font=("Arial", 9)).pack(anchor='w')
+        
+        self.window_var1 = tk.StringVar()
+        self.window_combo1 = ttk.Combobox(window_frame1, textvariable=self.window_var1, 
+                                         state='readonly', width=50)
+        self.window_combo1.pack(fill='x', pady=2)
+        self.window_combo1.bind('<<ComboboxSelected>>', lambda e: self.select_window(1))
         
         btn_frame1 = tk.Frame(frame1, bg='#e0e0e0')
         btn_frame1.pack(pady=5)
         
-        self.set_region1_btn = tk.Button(btn_frame1, text="Set Region 1", 
-                                        command=self.select_region1, 
-                                        bg='#4CAF50', fg='white', font=("Arial", 10))
-        self.set_region1_btn.pack(side='left', padx=5)
+        self.refresh_windows_btn1 = tk.Button(btn_frame1, text="Refresh", 
+                                            command=self.refresh_windows, 
+                                            font=("Arial", 9))
+        self.refresh_windows_btn1.pack(side='left', padx=2)
         
         self.start_stream1_btn = tk.Button(btn_frame1, text="Start Stream 1", 
                                           command=self.toggle_stream1, 
-                                          bg='#2196F3', fg='white', font=("Arial", 10),
+                                          font=("Arial", 9),
                                           state='disabled')
-        self.start_stream1_btn.pack(side='left', padx=5)
+        self.start_stream1_btn.pack(side='left', padx=2)
         
-        # Preview cho Region 1 (ảnh tĩnh)
-        self.preview1 = tk.Label(frame1, text="No region selected", 
-                                bg='black', fg='white')
-        self.preview1.pack(pady=5)
-        
-        # Link cho Region 1
+        # Link cho Window 1
         self.link1_frame = tk.Frame(frame1, bg='#e0e0e0')
         self.link1_frame.pack(fill='x', pady=5)
         
         self.link1_label = tk.Label(self.link1_frame, text="Link: Not available", 
-                                   bg='#e0e0e0', font=("Arial", 9))
+                                   bg='#e0e0e0', font=("Arial", 9), 
+                                   cursor="hand2", fg="blue")
         self.link1_label.pack(side='left')
+        self.link1_label.bind("<Button-1>", lambda e: self.copy_link1())
         
-        self.copy_link1_btn = tk.Button(self.link1_frame, text="Copy", 
-                                       command=self.copy_link1, 
-                                       bg='#FF9800', fg='white', font=("Arial", 8),
-                                       state='disabled')
-        self.copy_link1_btn.pack(side='right', padx=5)
-        
-        # Frame cho Region 2 (bên phải)
+        # Frame cho Window 2
         frame2 = tk.Frame(main_frame, bg='#e0e0e0', relief='raised', bd=2)
-        frame2.pack(side='right', fill='both', expand=True, padx=5)
+        frame2.pack(fill='x', pady=5)
         
-        tk.Label(frame2, text="Region 2", font=("Arial", 12, "bold"), bg='#e0e0e0').pack(pady=5)
+        tk.Label(frame2, text="Window 2", font=("Arial", 12, "bold"), bg='#e0e0e0').pack(pady=5)
+        
+        # Window selection frame
+        window_frame2 = tk.Frame(frame2, bg='#e0e0e0')
+        window_frame2.pack(fill='x', pady=5)
+        
+        tk.Label(window_frame2, text="Select Chrome Window:", bg='#e0e0e0', font=("Arial", 9)).pack(anchor='w')
+        
+        self.window_var2 = tk.StringVar()
+        self.window_combo2 = ttk.Combobox(window_frame2, textvariable=self.window_var2, 
+                                         state='readonly', width=50)
+        self.window_combo2.pack(fill='x', pady=2)
+        self.window_combo2.bind('<<ComboboxSelected>>', lambda e: self.select_window(2))
         
         btn_frame2 = tk.Frame(frame2, bg='#e0e0e0')
         btn_frame2.pack(pady=5)
         
-        self.set_region2_btn = tk.Button(btn_frame2, text="Set Region 2", 
-                                        command=self.select_region2, 
-                                        bg='#4CAF50', fg='white', font=("Arial", 10))
-        self.set_region2_btn.pack(side='left', padx=5)
+        self.refresh_windows_btn2 = tk.Button(btn_frame2, text="Refresh", 
+                                            command=self.refresh_windows, 
+                                            font=("Arial", 9))
+        self.refresh_windows_btn2.pack(side='left', padx=2)
         
         self.start_stream2_btn = tk.Button(btn_frame2, text="Start Stream 2", 
                                           command=self.toggle_stream2, 
-                                          bg='#2196F3', fg='white', font=("Arial", 10),
+                                          font=("Arial", 9),
                                           state='disabled')
-        self.start_stream2_btn.pack(side='left', padx=5)
+        self.start_stream2_btn.pack(side='left', padx=2)
         
-        # Preview cho Region 2 (ảnh tĩnh)
-        self.preview2 = tk.Label(frame2, text="No region selected", 
-                                bg='black', fg='white')
-        self.preview2.pack(pady=5)
-        
-        # Link cho Region 2
+        # Link cho Window 2
         self.link2_frame = tk.Frame(frame2, bg='#e0e0e0')
         self.link2_frame.pack(fill='x', pady=5)
         
         self.link2_label = tk.Label(self.link2_frame, text="Link: Not available", 
-                                   bg='#e0e0e0', font=("Arial", 9))
+                                   bg='#e0e0e0', font=("Arial", 9),
+                                   cursor="hand2", fg="blue")
         self.link2_label.pack(side='left')
-        
-        self.copy_link2_btn = tk.Button(self.link2_frame, text="Copy", 
-                                       command=self.copy_link2, 
-                                       bg='#FF9800', fg='white', font=("Arial", 8),
-                                       state='disabled')
-        self.copy_link2_btn.pack(side='right', padx=5)
+        self.link2_label.bind("<Button-1>", lambda e: self.copy_link2())
         
         # Status bar
-        self.status_label = tk.Label(self.root, text="Ready", 
+        capture_method = "PrintWindow API + DXCAM" if self.dxcam_camera else "PrintWindow API + Fallback"
+        self.status_label = tk.Label(self.root, text=f"Ready - {capture_method} - Click Refresh to load Chrome windows", 
                                     bg='#f0f0f0', font=("Arial", 10))
         self.status_label.pack(side='bottom', pady=5)
         
-    def select_region1(self):
-        self.select_region(1)
+        # Load Chrome windows on startup
+        self.refresh_windows()
         
-    def select_region2(self):
-        self.select_region(2)
+        # Add window validation timer
+        self.window_validation_timer()
         
-    def select_region(self, region_num):
-        self.root.withdraw()  # Ẩn cửa sổ chính
-        time.sleep(0.5)  # Đợi một chút để cửa sổ ẩn hoàn toàn
-        
+    def refresh_windows(self):
+        """Refresh danh sách các cửa sổ Chrome"""
         try:
-            # Tạo cửa sổ chọn vùng đơn giản
-            root_region = tk.Toplevel()
-            root_region.title(f"Select Region {region_num}")
-            root_region.attributes('-fullscreen', True)
-            root_region.attributes('-alpha', 0.3)
-            root_region.configure(bg='black')
-            root_region.overrideredirect(True)  # Loại bỏ thanh tiêu đề
+            chrome_windows = []
+            windows = gw.getWindowsWithTitle('')
             
-            # Tạo canvas để vẽ
-            canvas = tk.Canvas(root_region, bg='black', highlightthickness=0)
-            canvas.pack(fill='both', expand=True)
+            for window in windows:
+                if 'chrome' in window.title.lower() and window.visible:
+                    chrome_windows.append(f"{window.title} (HWND: {window._hWnd})")
             
-            # Thêm hướng dẫn
-            canvas.create_text(root_region.winfo_screenwidth()//2, 50, 
-                             text=f"Click and drag to select Region {region_num}\nPress ESC to cancel", 
-                             fill='white', font=("Arial", 16), justify='center')
+            # Update comboboxes
+            self.window_combo1['values'] = chrome_windows
+            self.window_combo2['values'] = chrome_windows
             
-            # Biến để lưu vùng chọn
-            start_x = start_y = end_x = end_y = 0
-            selecting = False
-            
-            def on_click(event):
-                nonlocal start_x, start_y, selecting
-                start_x, start_y = event.x, event.y
-                selecting = True
+            if chrome_windows:
+                self.status_label.config(text=f"Found {len(chrome_windows)} Chrome windows")
+            else:
+                self.status_label.config(text="No Chrome windows found - Please open Chrome first")
                 
-            def on_drag(event):
-                nonlocal end_x, end_y
-                if selecting:
-                    end_x, end_y = event.x, event.y
-                    # Vẽ hình chữ nhật
-                    canvas.delete("rect")
-                    canvas.create_rectangle(start_x, start_y, end_x, end_y, 
-                                          outline='red', width=2, tags="rect")
-            
-            def on_release(event):
-                nonlocal end_x, end_y, selecting
-                if selecting:
-                    end_x, end_y = event.x, event.y
-                    selecting = False
-                    # Lưu vùng chọn
-                    region_coords = {
-                        'left': min(start_x, end_x),
-                        'top': min(start_y, end_y),
-                        'width': abs(end_x - start_x),
-                        'height': abs(end_y - start_y)
-                    }
-                    
-                    if region_coords['width'] > 10 and region_coords['height'] > 10:
-                        if region_num == 1:
-                            self.region1 = region_coords
-                            self.start_stream1_btn.config(state='normal')
-                            self.capture_preview_image(1)
-                        else:
-                            self.region2 = region_coords
-                            self.start_stream2_btn.config(state='normal')
-                            self.capture_preview_image(2)
+        except Exception as e:
+            messagebox.showerror("Error", f"Error refreshing windows: {str(e)}")
+            self.status_label.config(text="Error refreshing windows")
+    
+    def window_validation_timer(self):
+        """Kiểm tra định kỳ xem cửa sổ đã chọn có còn tồn tại không"""
+        try:
+            # Check if selected windows are still valid
+            if self.selected_window1:
+                if not self.is_window_valid(self.selected_window1):
+                    self.selected_window1 = None
+                    self.start_stream1_btn.config(state='disabled')
+                    if self.streaming1:
+                        self.stop_stream1()
                         
-                        self.status_label.config(text=f"Region {region_num} selected: {region_coords['width']}x{region_coords['height']}")
-                    
-                    root_region.destroy()
-                    self.root.deiconify()  # Hiển thị lại cửa sổ chính
-                    
-            def on_escape(event):
-                root_region.destroy()
-                self.root.deiconify()
+            if self.selected_window2:
+                if not self.is_window_valid(self.selected_window2):
+                    self.selected_window2 = None
+                    self.start_stream2_btn.config(state='disabled')
+                    if self.streaming2:
+                        self.stop_stream2()
+                        
+        except Exception as e:
+            print(f"Error in window validation: {e}")
+        
+        # Schedule next check in 2 seconds
+        self.root.after(2000, self.window_validation_timer)
+    
+    def is_window_valid(self, window):
+        """Kiểm tra xem cửa sổ có còn tồn tại và hợp lệ không"""
+        try:
+            # Check if window handle is still valid
+            if not win32gui.IsWindow(window._hWnd):
+                return False
                 
-            # Bind events
-            canvas.bind('<Button-1>', on_click)
-            canvas.bind('<B1-Motion>', on_drag)
-            canvas.bind('<ButtonRelease-1>', on_release)
-            root_region.bind('<Escape>', on_escape)
-            root_region.focus_set()
-            
-            # Đảm bảo cửa sổ ở trên cùng
-            root_region.lift()
-            root_region.attributes('-topmost', True)
+            # Check if window is still visible
+            if not win32gui.IsWindowVisible(window._hWnd):
+                return False
+                
+            # Check if window title still contains 'chrome'
+            title = win32gui.GetWindowText(window._hWnd)
+            if 'chrome' not in title.lower():
+                return False
+                
+            return True
             
         except Exception as e:
-            messagebox.showerror("Error", f"Error selecting region: {str(e)}")
-            self.root.deiconify()
-            
-    def capture_preview_image(self, region_num):
-        """Capture a static preview image after region selection"""
+            print(f"Error validating window: {e}")
+            return False
+    
+        
+    def select_window(self, window_num):
+        """Chọn cửa sổ Chrome từ combobox"""
         try:
-            if region_num == 1 and self.region1:
-                img = self.capture_screen_region(self.region1)
-                if img is not None:
-                    # Resize for preview - maintain aspect ratio
-                    h, w = img.shape[:2]
-                    max_width, max_height = 300, 200  # Kích thước preview vừa phải
-                    
-                    # Calculate scaling factor
-                    scale = min(max_width/w, max_height/h)
-                    new_w = int(w * scale)
-                    new_h = int(h * scale)
-                    
-                    # Đảm bảo kích thước tối thiểu
-                    if new_w < 80:
-                        new_w = 80
-                    if new_h < 60:
-                        new_h = 60
-                    
-                    preview_img = cv2.resize(img, (new_w, new_h))
-                    preview_img = cv2.cvtColor(preview_img, cv2.COLOR_BGR2RGB)
-                    preview_img = Image.fromarray(preview_img)
-                    preview_img = ImageTk.PhotoImage(preview_img)
-                    
-                    self.preview1.config(image=preview_img, text="")
-                    self.preview1.image = preview_img
-                    
-            elif region_num == 2 and self.region2:
-                img = self.capture_screen_region(self.region2)
-                if img is not None:
-                    # Resize for preview - maintain aspect ratio
-                    h, w = img.shape[:2]
-                    max_width, max_height = 300, 200  # Kích thước preview vừa phải
-                    
-                    # Calculate scaling factor
-                    scale = min(max_width/w, max_height/h)
-                    new_w = int(w * scale)
-                    new_h = int(h * scale)
-                    
-                    # Đảm bảo kích thước tối thiểu
-                    if new_w < 80:
-                        new_w = 80
-                    if new_h < 60:
-                        new_h = 60
-                    
-                    preview_img = cv2.resize(img, (new_w, new_h))
-                    preview_img = cv2.cvtColor(preview_img, cv2.COLOR_BGR2RGB)
-                    preview_img = Image.fromarray(preview_img)
-                    preview_img = ImageTk.PhotoImage(preview_img)
-                    
-                    self.preview2.config(image=preview_img, text="")
-                    self.preview2.image = preview_img
-                    
-        except Exception as e:
-            print(f"Error capturing preview image for region {region_num}: {e}")
+            if window_num == 1:
+                selected_text = self.window_var1.get()
+                combo = self.window_combo1
+            else:
+                selected_text = self.window_var2.get()
+                combo = self.window_combo2
+                
+            if not selected_text:
+                messagebox.showwarning("Warning", f"Please select a Chrome window first!")
+                return
+                
+            # Extract HWND from selected text
+            hwnd_str = selected_text.split('(HWND: ')[1].rstrip(')')
+            hwnd = int(hwnd_str)
             
-    def update_preview_image(self, region_num, preview_img):
-        """Update preview image in main thread"""
-        try:
-            if region_num == 1:
-                self.preview1.config(image=preview_img)
-                self.preview1.image = preview_img
-            elif region_num == 2:
-                self.preview2.config(image=preview_img)
-                self.preview2.image = preview_img
+            # Get window object
+            window = None
+            for w in gw.getWindowsWithTitle(''):
+                if w._hWnd == hwnd:
+                    window = w
+                    break
+                    
+            if not window:
+                messagebox.showerror("Error", "Selected window not found!")
+                return
+                
+            # Store selected window
+            if window_num == 1:
+                self.selected_window1 = window
+                self.start_stream1_btn.config(state='normal')
+            else:
+                self.selected_window2 = window
+                self.start_stream2_btn.config(state='normal')
+            
+            self.status_label.config(text=f"Window {window_num} selected: {window.title}")
+            
         except Exception as e:
-            print(f"Error updating preview {region_num}: {e}")
+            messagebox.showerror("Error", f"Error selecting window: {str(e)}")
+            self.status_label.config(text="Error selecting window")
+            
             
     def toggle_stream1(self):
         if not self.streaming1:
@@ -312,52 +286,146 @@ class ScreenStreamTool:
         else:
             self.stop_stream2()
             
+    def capture_window(self, window):
+        """Capture cửa sổ Chrome cụ thể sử dụng PrintWindow API - hoạt động ngay cả khi cửa sổ bị che"""
+        try:
+            hwnd = window._hWnd
+            
+            # Get window rectangle
+            left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+            width = right - left
+            height = bottom - top
+            
+            # Check if window is valid
+            if width <= 0 or height <= 0:
+                return None
+            
+            # Method 1: Try PrintWindow API (works even if window is covered)
+            try:
+                img = self.capture_window_printwindow(hwnd, width, height)
+                if img is not None:
+                    return img
+            except Exception as e:
+                print(f"PrintWindow capture failed: {e}")
+            
+            # Method 2: Try DXCAM as fallback
+            if self.dxcam_camera:
+                try:
+                    img = self.dxcam_camera.grab(region=(left, top, right, bottom))
+                    if img is not None:
+                        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                        return img
+                except Exception as e:
+                    print(f"DXCAM capture failed: {e}")
+            
+            # Method 3: Fallback to pyautogui (only works if window is visible)
+            try:
+                screenshot = pyautogui.screenshot(region=(left, top, width, height))
+                img = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+                return img
+            except Exception as e:
+                print(f"All capture methods failed: {e}")
+                return None
+            
+        except Exception as e:
+            print(f"Error capturing window: {e}")
+            return None
+    
+    def capture_window_printwindow(self, hwnd, width, height):
+        """Capture cửa sổ sử dụng PrintWindow API - hoạt động ngay cả khi cửa sổ bị che"""
+        try:
+            # Load user32.dll and get PrintWindow function
+            user32 = ctypes.windll.user32
+            
+            # Get device context of the window
+            hwndDC = win32gui.GetWindowDC(hwnd)
+            mfcDC = win32ui.CreateDCFromHandle(hwndDC)
+            saveDC = mfcDC.CreateCompatibleDC()
+            
+            # Create bitmap
+            saveBitMap = win32ui.CreateBitmap()
+            saveBitMap.CreateCompatibleBitmap(mfcDC, width, height)
+            saveDC.SelectObject(saveBitMap)
+            
+            # Use PrintWindow to capture the window
+            # PW_RENDERFULLCONTENT = 3
+            result = user32.PrintWindow(hwnd, saveDC.GetSafeHdc(), 3)
+            
+            if result:
+                # Get bitmap data
+                bmpinfo = saveBitMap.GetInfo()
+                bmpstr = saveBitMap.GetBitmapBits(True)
+                
+                # Convert to numpy array
+                img = np.frombuffer(bmpstr, dtype='uint8')
+                img.shape = (height, width, 4)  # BGRA format
+                
+                # Convert BGRA to BGR
+                img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+                
+                # Clean up
+                win32gui.DeleteObject(saveBitMap.GetHandle())
+                saveDC.DeleteDC()
+                mfcDC.DeleteDC()
+                win32gui.ReleaseDC(hwnd, hwndDC)
+                
+                return img
+            else:
+                # Clean up on failure
+                win32gui.DeleteObject(saveBitMap.GetHandle())
+                saveDC.DeleteDC()
+                mfcDC.DeleteDC()
+                win32gui.ReleaseDC(hwnd, hwndDC)
+                return None
+                
+        except Exception as e:
+            print(f"PrintWindow capture error: {e}")
+            return None
+    
     def start_stream1(self):
-        if not self.region1:
-            messagebox.showerror("Error", "Please select Region 1 first!")
+        if not self.selected_window1:
+            messagebox.showerror("Error", "Please select Window 1 first!")
             return
             
         self.streaming1 = True
-        self.start_stream1_btn.config(text="Stop Stream 1", bg='#f44336')
-        self.capture_thread1 = threading.Thread(target=self.capture_region1, daemon=True)
+        self.start_stream1_btn.config(text="Stop Stream 1")
+        self.capture_thread1 = threading.Thread(target=self.capture_window1, daemon=True)
         self.capture_thread1.start()
         self.status_label.config(text="Stream 1 started")
         
         # Update link display
         self.link1_label.config(text="Link: http://localhost:5000/stream1")
-        self.copy_link1_btn.config(state='normal')
         
     def start_stream2(self):
-        if not self.region2:
-            messagebox.showerror("Error", "Please select Region 2 first!")
+        if not self.selected_window2:
+            messagebox.showerror("Error", "Please select Window 2 first!")
             return
             
         self.streaming2 = True
-        self.start_stream2_btn.config(text="Stop Stream 2", bg='#f44336')
-        self.capture_thread2 = threading.Thread(target=self.capture_region2, daemon=True)
+        self.start_stream2_btn.config(text="Stop Stream 2")
+        self.capture_thread2 = threading.Thread(target=self.capture_window2, daemon=True)
         self.capture_thread2.start()
         self.status_label.config(text="Stream 2 started")
         
         # Update link display
         self.link2_label.config(text="Link: http://localhost:5000/stream2")
-        self.copy_link2_btn.config(state='normal')
         
     def stop_stream1(self):
         self.streaming1 = False
-        self.start_stream1_btn.config(text="Start Stream 1", bg='#2196F3')
+        self.start_stream1_btn.config(text="Start Stream 1")
         self.status_label.config(text="Stream 1 stopped")
         
     def stop_stream2(self):
         self.streaming2 = False
-        self.start_stream2_btn.config(text="Start Stream 2", bg='#2196F3')
+        self.start_stream2_btn.config(text="Start Stream 2")
         self.status_label.config(text="Stream 2 stopped")
         
-    def capture_region1(self):
+    def capture_window1(self):
         while self.streaming1:
             try:
-                if self.region1:
-                    # Capture screen region using pyautogui
-                    img = self.capture_screen_region(self.region1)
+                if self.selected_window1:
+                    # Capture Chrome window
+                    img = self.capture_window(self.selected_window1)
                     
                     if img is not None:
                         # Add to queue for streaming only
@@ -365,16 +433,16 @@ class ScreenStreamTool:
                             self.frame_queue1.put(img)
                         
             except Exception as e:
-                print(f"Error capturing region 1: {e}")
+                print(f"Error capturing window 1: {e}")
                 
-            time.sleep(1/5)  # 5 FPS để tránh treo máy
+            time.sleep(1/10)  # 10 FPS cho mượt hơn
             
-    def capture_region2(self):
+    def capture_window2(self):
         while self.streaming2:
             try:
-                if self.region2:
-                    # Capture screen region using pyautogui
-                    img = self.capture_screen_region(self.region2)
+                if self.selected_window2:
+                    # Capture Chrome window
+                    img = self.capture_window(self.selected_window2)
                     
                     if img is not None:
                         # Add to queue for streaming only
@@ -382,29 +450,10 @@ class ScreenStreamTool:
                             self.frame_queue2.put(img)
                         
             except Exception as e:
-                print(f"Error capturing region 2: {e}")
+                print(f"Error capturing window 2: {e}")
                 
-            time.sleep(1/5)  # 5 FPS để tránh treo máy
+            time.sleep(1/10)  # 10 FPS cho mượt hơn
             
-    def capture_screen_region(self, region):
-        """Capture screen region using pyautogui"""
-        try:
-            # Capture screenshot of the region
-            screenshot = pyautogui.screenshot(region=(region['left'], region['top'], 
-                                                    region['width'], region['height']))
-            
-            # Convert PIL to OpenCV format
-            img = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
-            
-            # Debug: print region info
-            print(f"Capturing region: {region['left']}, {region['top']}, {region['width']}, {region['height']}")
-            print(f"Image shape: {img.shape}")
-            
-            return img
-            
-        except Exception as e:
-            print(f"Error in capture_screen_region: {e}")
-            return None
             
     def setup_flask_routes(self):
         @self.app.route('/')
@@ -447,13 +496,13 @@ class ScreenStreamTool:
                     <h1>Screen Stream Tool</h1>
                     
                     <div class="stream-box">
-                        <h2>Region 1 Stream</h2>
+                        <h2>Chrome Window 1 Stream</h2>
                         <div id="status1" class="status offline">Offline</div>
                         <img id="stream1" src="/stream1" style="display: none;">
                     </div>
                     
                     <div class="stream-box">
-                        <h2>Region 2 Stream</h2>
+                        <h2>Chrome Window 2 Stream</h2>
                         <div id="status2" class="status offline">Offline</div>
                         <img id="stream2" src="/stream2" style="display: none;">
                     </div>
@@ -501,26 +550,26 @@ class ScreenStreamTool:
             return Response(self.generate_frames(2), 
                           mimetype='multipart/x-mixed-replace; boundary=frame')
             
-    def generate_frames(self, region_num):
+    def generate_frames(self, window_num):
         while True:
             try:
                 frame = None
                 
                 # Check if streaming is active
-                if region_num == 1 and self.streaming1:
+                if window_num == 1 and self.streaming1:
                     if not self.frame_queue1.empty():
                         frame = self.frame_queue1.get()
                     else:
                         # If no frame in queue, capture directly
-                        if self.region1:
-                            frame = self.capture_screen_region(self.region1)
-                elif region_num == 2 and self.streaming2:
+                        if self.selected_window1:
+                            frame = self.capture_window(self.selected_window1)
+                elif window_num == 2 and self.streaming2:
                     if not self.frame_queue2.empty():
                         frame = self.frame_queue2.get()
                     else:
                         # If no frame in queue, capture directly
-                        if self.region2:
-                            frame = self.capture_screen_region(self.region2)
+                        if self.selected_window2:
+                            frame = self.capture_window(self.selected_window2)
                 
                 if frame is not None:
                     # Resize frame for web streaming
@@ -543,7 +592,7 @@ class ScreenStreamTool:
                 else:
                     # Send a test frame if no data
                     frame = np.zeros((200, 200, 3), dtype=np.uint8)
-                    cv2.putText(frame, f"No data for region {region_num}", (10, 100), 
+                    cv2.putText(frame, f"No data for window {window_num}", (10, 100), 
                                cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
                     ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
                     frame_bytes = buffer.tobytes()
@@ -552,7 +601,7 @@ class ScreenStreamTool:
                            b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
                        
             except Exception as e:
-                print(f"Error generating frames for region {region_num}: {e}")
+                print(f"Error generating frames for window {window_num}: {e}")
                 time.sleep(0.1)
                 
     def setup_flask_thread(self):
@@ -567,20 +616,16 @@ class ScreenStreamTool:
             link = "http://localhost:5000/stream1"
             pyperclip.copy(link)
             self.link1_label.config(text=f"Link: {link}")
-            self.copy_link1_btn.config(state='normal')
-            messagebox.showinfo("Link Copied", f"Stream 1 link copied to clipboard:\n{link}")
         else:
-            messagebox.showwarning("Warning", "Please start Stream 1 first!")
+            self.link1_label.config(text="Link: Not available - Start stream first")
             
     def copy_link2(self):
         if self.streaming2:
             link = "http://localhost:5000/stream2"
             pyperclip.copy(link)
             self.link2_label.config(text=f"Link: {link}")
-            self.copy_link2_btn.config(state='normal')
-            messagebox.showinfo("Link Copied", f"Stream 2 link copied to clipboard:\n{link}")
         else:
-            messagebox.showwarning("Warning", "Please start Stream 2 first!")
+            self.link2_label.config(text="Link: Not available - Start stream first")
             
     def run(self):
         self.root.mainloop()
