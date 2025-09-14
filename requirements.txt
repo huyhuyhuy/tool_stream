@@ -7,4 +7,5 @@ pyautogui>=0.9.50
 mss>=9.0.0
 pywin32>=306
 pygetwindow>=0.0.9
-dxcam>=0.0.7
+dxcam>=0.0.5
+pyinstaller>=6.0.0

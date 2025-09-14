@@ -32,6 +32,9 @@ class ScreenStreamTool:
         self.streaming1 = False
         self.streaming2 = False
         
+        # Cài đặt chất lượng stream
+        self.use_png = False  # True = PNG (chất lượng cao), False = JPEG (nhanh)
+        
         # Biến cho streaming
         self.frame_queue1 = queue.Queue(maxsize=2)
         self.frame_queue2 = queue.Queue(maxsize=2)
@@ -95,6 +98,12 @@ class ScreenStreamTool:
                                           font=("Arial", 9),
                                           state='disabled')
         self.start_stream1_btn.pack(side='left', padx=2)
+        
+        # Quality toggle button
+        self.quality_btn = tk.Button(btn_frame1, text="Quality: JPEG", 
+                                    command=self.toggle_quality, 
+                                    font=("Arial", 8))
+        self.quality_btn.pack(side='right', padx=2)
         
         # Link cho Window 1
         self.link1_frame = tk.Frame(frame1, bg='#e0e0e0')
@@ -286,6 +295,16 @@ class ScreenStreamTool:
         else:
             self.stop_stream2()
             
+    def toggle_quality(self):
+        """Toggle between PNG (high quality) and JPEG (fast)"""
+        self.use_png = not self.use_png
+        if self.use_png:
+            self.quality_btn.config(text="Quality: PNG")
+            self.status_label.config(text="Quality set to PNG (high quality, slower)")
+        else:
+            self.quality_btn.config(text="Quality: JPEG")
+            self.status_label.config(text="Quality set to JPEG (fast, good quality)")
+            
     def capture_window(self, window):
         """Capture cửa sổ Chrome cụ thể sử dụng PrintWindow API - hoạt động ngay cả khi cửa sổ bị che"""
         try:
@@ -311,10 +330,14 @@ class ScreenStreamTool:
             # Method 2: Try DXCAM as fallback
             if self.dxcam_camera:
                 try:
-                    img = self.dxcam_camera.grab(region=(left, top, right, bottom))
-                    if img is not None:
-                        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-                        return img
+                    # Check if region is within screen bounds
+                    screen_width, screen_height = pyautogui.size()
+                    if (left >= 0 and top >= 0 and right <= screen_width and bottom <= screen_height and 
+                        right > left and bottom > top):
+                        img = self.dxcam_camera.grab(region=(left, top, right, bottom))
+                        if img is not None:
+                            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                            return img
                 except Exception as e:
                     print(f"DXCAM capture failed: {e}")
             
@@ -334,11 +357,18 @@ class ScreenStreamTool:
     def capture_window_printwindow(self, hwnd, width, height):
         """Capture cửa sổ sử dụng PrintWindow API - hoạt động ngay cả khi cửa sổ bị che"""
         try:
+            # Check if window is still valid
+            if not win32gui.IsWindow(hwnd):
+                return None
+                
             # Load user32.dll and get PrintWindow function
             user32 = ctypes.windll.user32
             
             # Get device context of the window
             hwndDC = win32gui.GetWindowDC(hwnd)
+            if not hwndDC:
+                return None
+                
             mfcDC = win32ui.CreateDCFromHandle(hwndDC)
             saveDC = mfcDC.CreateCompatibleDC()
             
@@ -435,7 +465,7 @@ class ScreenStreamTool:
             except Exception as e:
                 print(f"Error capturing window 1: {e}")
                 
-            time.sleep(1/10)  # 10 FPS cho mượt hơn
+            time.sleep(1/15)  # 15 FPS cho mượt hơn
             
     def capture_window2(self):
         while self.streaming2:
@@ -452,7 +482,7 @@ class ScreenStreamTool:
             except Exception as e:
                 print(f"Error capturing window 2: {e}")
                 
-            time.sleep(1/10)  # 10 FPS cho mượt hơn
+            time.sleep(1/15)  # 15 FPS cho mượt hơn
             
             
     def setup_flask_routes(self):
@@ -572,23 +602,32 @@ class ScreenStreamTool:
                             frame = self.capture_window(self.selected_window2)
                 
                 if frame is not None:
-                    # Resize frame for web streaming
+                    # Resize frame for web streaming - tăng kích thước để rõ nét hơn
                     h, w = frame.shape[:2]
-                    max_width, max_height = 800, 600  # Kích thước vừa phải
+                    max_width, max_height = 1200, 900  # Tăng kích thước từ 800x600
                     
                     # Calculate scaling factor
                     scale = min(max_width/w, max_height/h)
                     new_w = int(w * scale)
                     new_h = int(h * scale)
                     
-                    frame = cv2.resize(frame, (new_w, new_h))
+                    # Sử dụng INTER_LANCZOS4 để resize chất lượng cao
+                    frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
                     
-                    # Encode frame as JPEG
-                    ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                    # Encode frame based on quality setting
+                    if self.use_png:
+                        # PNG - chất lượng cao nhất, không nén lossy
+                        ret, buffer = cv2.imencode('.png', frame)
+                        content_type = b'image/png'
+                    else:
+                        # JPEG - nhanh hơn, chất lượng tốt
+                        ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                        content_type = b'image/jpeg'
+                    
                     frame_bytes = buffer.tobytes()
                     
                     yield (b'--frame\r\n'
-                           b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+                           b'Content-Type: ' + content_type + b'\r\n\r\n' + frame_bytes + b'\r\n')
                 else:
                     # Send a test frame if no data
                     frame = np.zeros((200, 200, 3), dtype=np.uint8)
