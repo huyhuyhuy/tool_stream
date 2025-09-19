@@ -1,0 +1,13 @@
+opencv-python>=4.8.0
+Pillow>=10.1.0
+flask>=2.3.0
+flask-cors>=4.0.0
+numpy>=1.24.0
+pyautogui>=0.9.50
+mss>=9.0.0
+pygetwindow>=0.0.9
+pyperclip>=1.8.2
+# Linux specific packages
+python3-tk
+# For headless display
+pyvirtualdisplay>=3.0

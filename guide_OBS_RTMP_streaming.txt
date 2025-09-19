@@ -1,0 +1,1407 @@
+═══════════════════════════════════════════════════════════════════════════════
+🎥 HƯỚNG DẪN STREAMING VỚI OBS + NGINX-RTMP SERVER TỰ TRIỂN KHAI
+═══════════════════════════════════════════════════════════════════════════════
+
+📌 TỔNG QUAN GIẢI PHÁP:
+- VPS: Nginx-RTMP server nhận stream từ OBS → xuất HLS cho viewers
+- Windows: OBS Studio stream lên VPS server với chất lượng cao (60 FPS)
+- Viewers: Truy cập http://VPS_IP để xem live stream chất lượng HD/4K
+
+🎯 ƯU ĐIỂM:
+✅ OBS Studio - phần mềm streaming chuyên nghiệp #1 thế giới
+✅ Hardware encoding tối ưu (NVENC/QuickSync/AMF) 
+✅ 60+ FPS mượt mà với chất lượng 4K
+✅ Giao diện đẹp với scenes, overlays, transitions
+✅ Nhiều nguồn: desktop, window, webcam, audio mixing
+✅ Server riêng - không phụ thuộc YouTube/Twitch
+✅ Bandwidth không giới hạn - stream 24/7
+✅ Độ trễ thấp (~2-5 giây)
+✅ Nhiều người xem cùng lúc ổn định
+
+═══════════════════════════════════════════════════════════════════════════════
+PHẦN 1: TRIỂN KHAI NGINX-RTMP SERVER TRÊN VPS UBUNTU
+═══════════════════════════════════════════════════════════════════════════════
+
+Bước 1: SSH vào VPS và cập nhật hệ thống
+─────────────────────────────────────────────────────────────────────────────
+ssh root@45.76.190.6
+
+# Cập nhật hệ thống
+apt update && apt upgrade -y
+
+# Cài đặt các tools cần thiết
+apt install -y wget curl nano htop net-tools
+
+Bước 2: Cài đặt Nginx với RTMP module
+─────────────────────────────────────────────────────────────────────────────
+# Cài đặt dependencies
+apt install -y build-essential libpcre3 libpcre3-dev zlib1g zlib1g-dev libssl-dev libgd-dev libxml2 libxml2-dev uuid-dev
+
+# Tạo thư mục build
+mkdir -p ~/nginx_rtmp_build && cd ~/nginx_rtmp_build
+
+# Download Nginx source
+wget http://nginx.org/download/nginx-1.24.0.tar.gz
+tar -xzf nginx-1.24.0.tar.gz
+
+# Download nginx-rtmp-module
+wget https://github.com/arut/nginx-rtmp-module/archive/master.zip
+apt install -y unzip
+unzip master.zip
+
+Bước 3: Compile Nginx với RTMP module
+─────────────────────────────────────────────────────────────────────────────
+cd nginx-1.24.0
+
+./configure \
+  --prefix=/etc/nginx \
+  --sbin-path=/usr/sbin/nginx \
+  --modules-path=/usr/lib/nginx/modules \
+  --conf-path=/etc/nginx/nginx.conf \
+  --error-log-path=/var/log/nginx/error.log \
+  --http-log-path=/var/log/nginx/access.log \
+  --pid-path=/var/run/nginx.pid \
+  --lock-path=/var/run/nginx.lock \
+  --http-client-body-temp-path=/var/cache/nginx/client_temp \
+  --http-proxy-temp-path=/var/cache/nginx/proxy_temp \
+  --http-fastcgi-temp-path=/var/cache/nginx/fastcgi_temp \
+  --http-uwsgi-temp-path=/var/cache/nginx/uwsgi_temp \
+  --http-scgi-temp-path=/var/cache/nginx/scgi_temp \
+  --user=nginx \
+  --group=nginx \
+  --with-compat \
+  --with-file-aio \
+  --with-threads \
+  --with-http_addition_module \
+  --with-http_auth_request_module \
+  --with-http_dav_module \
+  --with-http_flv_module \
+  --with-http_gunzip_module \
+  --with-http_gzip_static_module \
+  --with-http_mp4_module \
+  --with-http_random_index_module \
+  --with-http_realip_module \
+  --with-http_secure_link_module \
+  --with-http_slice_module \
+  --with-http_ssl_module \
+  --with-http_stub_status_module \
+  --with-http_sub_module \
+  --with-http_v2_module \
+  --with-stream \
+  --with-stream_realip_module \
+  --with-stream_ssl_module \
+  --with-stream_ssl_preread_module \
+  --add-module=../nginx-rtmp-module-master
+
+# Compile và install
+make && make install
+
+Bước 4: Tạo user và thư mục cần thiết
+─────────────────────────────────────────────────────────────────────────────
+# Tạo nginx user
+useradd --system --home /var/cache/nginx --shell /sbin/nologin --comment "nginx user" --user-group nginx
+
+# Tạo thư mục cache
+mkdir -p /var/cache/nginx
+chown -R nginx:nginx /var/cache/nginx
+
+# Tạo thư mục cho HLS streams
+mkdir -p /var/www/html/hls
+mkdir -p /var/www/html/dash
+chown -R nginx:nginx /var/www/html
+chmod 755 /var/www/html/hls
+chmod 755 /var/www/html/dash
+
+# Tạo thư mục recordings (optional)
+mkdir -p /var/recordings
+chown -R nginx:nginx /var/recordings
+
+Bước 5: Tạo file cấu hình nginx.conf
+─────────────────────────────────────────────────────────────────────────────
+cat > /etc/nginx/nginx.conf << 'EOF'
+user nginx;
+worker_processes auto;
+error_log /var/log/nginx/error.log warn;
+pid /run/nginx.pid;
+
+events {
+    worker_connections 1024;
+    use epoll;
+    multi_accept on;
+}
+
+# RTMP Configuration for OBS Streaming
+rtmp {
+    server {
+        listen 1935;
+        chunk_size 4096;
+        allow publish all;
+        
+        # Main live application
+        application live {
+            live on;
+            
+            # Enable HLS (HTTP Live Streaming)
+            hls on;
+            hls_path /var/www/html/hls;
+            hls_fragment 2s;
+            hls_playlist_length 10s;
+            hls_continuous on;
+            hls_cleanup on;
+            hls_nested on;
+            
+            # Enable DASH (Dynamic Adaptive Streaming)
+            dash on;
+            dash_path /var/www/html/dash;
+            dash_fragment 2s;
+            dash_playlist_length 10s;
+            dash_nested on;
+            dash_cleanup on;
+            
+            # Optional: Enable recording
+            record all;
+            record_path /var/recordings;
+            record_unique on;
+            record_suffix .flv;
+            record_append on;
+            
+            # Optional: Enable authentication (uncomment if needed)
+            # publish_notify on;
+            # play_notify on;
+            
+            # Stream quality variants (optional)
+            exec_push ffmpeg -i rtmp://localhost/live/$name 
+              -c:v libx264 -preset veryfast -tune zerolatency -crf 23 -g 60 -keyint_min 60 
+              -c:a aac -b:a 128k -ac 2 -ar 44100 
+              -f flv rtmp://localhost/live_hd/$name;
+        }
+        
+        # HD variant application (optional)
+        application live_hd {
+            live on;
+            allow publish 127.0.0.1;
+            deny publish all;
+            
+            hls on;
+            hls_path /var/www/html/hls_hd;
+            hls_fragment 2s;
+            hls_playlist_length 10s;
+            hls_continuous on;
+            hls_cleanup on;
+        }
+        
+        # Play application for playback
+        application play {
+            live on;
+            play /var/recordings;
+        }
+    }
+}
+
+# HTTP Configuration
+http {
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+    
+    # Logging format
+    log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                    '$status $body_bytes_sent "$http_referer" '
+                    '"$http_user_agent" "$http_x_forwarded_for"';
+    
+    access_log /var/log/nginx/access.log main;
+    
+    # Performance settings
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    keepalive_timeout 65;
+    types_hash_max_size 2048;
+    client_max_body_size 100M;
+    
+    # Gzip compression
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 1024;
+    gzip_types text/plain text/css text/xml text/javascript application/javascript application/xml+rss application/json;
+    
+    # Main server for streaming
+    server {
+        listen 80;
+        server_name _;
+        
+        # Security headers
+        add_header X-Frame-Options "SAMEORIGIN";
+        add_header X-Content-Type-Options "nosniff";
+        add_header X-XSS-Protection "1; mode=block";
+        
+        # CORS headers for streaming
+        add_header Access-Control-Allow-Origin *;
+        add_header Access-Control-Allow-Methods 'GET, POST, OPTIONS';
+        add_header Access-Control-Allow-Headers 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range';
+        add_header Access-Control-Expose-Headers 'Content-Length,Content-Range';
+
+        # Root directory
+        root /var/www/html;
+        index index.html;
+
+        # Main page
+        location / {
+            try_files $uri $uri/ /index.html;
+        }
+
+        # HLS streaming endpoint
+        location /hls {
+            types {
+                application/vnd.apple.mpegurl m3u8;
+                video/mp2t ts;
+            }
+            root /var/www/html;
+            expires -1;
+            add_header Cache-Control no-cache;
+            add_header Access-Control-Allow-Origin *;
+            
+            # Optional: Add authentication
+            # auth_basic "Stream Access";
+            # auth_basic_user_file /etc/nginx/.htpasswd;
+        }
+        
+        # HLS HD streaming endpoint
+        location /hls_hd {
+            types {
+                application/vnd.apple.mpegurl m3u8;
+                video/mp2t ts;
+            }
+            root /var/www/html;
+            expires -1;
+            add_header Cache-Control no-cache;
+            add_header Access-Control-Allow-Origin *;
+        }
+
+        # DASH streaming endpoint
+        location /dash {
+            types {
+                application/dash+xml mpd;
+                video/mp4 mp4;
+            }
+            root /var/www/html;
+            expires -1;
+            add_header Cache-Control no-cache;
+            add_header Access-Control-Allow-Origin *;
+        }
+
+        # RTMP statistics page
+        location /stats {
+            rtmp_stat all;
+            rtmp_stat_stylesheet stat.xsl;
+            auth_basic "RTMP Stats";
+            auth_basic_user_file /etc/nginx/.htpasswd;
+        }
+
+        location /stat.xsl {
+            root /etc/nginx/;
+        }
+        
+        # API endpoint for stream status
+        location /api/stream {
+            rtmp_stat all;
+            rtmp_stat_format json;
+            add_header Access-Control-Allow-Origin *;
+        }
+        
+        # Health check endpoint
+        location /health {
+            access_log off;
+            return 200 "healthy\n";
+            add_header Content-Type text/plain;
+        }
+    }
+}
+EOF
+
+Bước 6: Tạo systemd service cho Nginx
+─────────────────────────────────────────────────────────────────────────────
+cat > /etc/systemd/system/nginx.service << 'EOF'
+[Unit]
+Description=The nginx HTTP and reverse proxy server
+Documentation=http://nginx.org/en/docs/
+After=network-online.target remote-fs.target nss-lookup.target
+Wants=network-online.target
+
+[Service]
+Type=forking
+PIDFile=/run/nginx.pid
+ExecStartPre=/usr/sbin/nginx -t -q
+ExecStart=/usr/sbin/nginx
+ExecStartPost=/bin/sleep 0.1
+ExecReload=/bin/kill -s HUP $MAINPID
+ExecStop=/bin/kill -s TERM $MAINPID
+KillSignal=SIGQUIT
+TimeoutStopSec=5
+KillMode=mixed
+PrivateTmp=true
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+Bước 7: Cấu hình firewall
+─────────────────────────────────────────────────────────────────────────────
+# Mở port cho HTTP (80)
+ufw allow 80/tcp
+
+# Mở port cho RTMP (1935) 
+ufw allow 1935/tcp
+
+# Optional: Mở HTTPS (443) nếu cần SSL
+ufw allow 443/tcp
+
+# Kiểm tra firewall status
+ufw status
+
+Bước 8: Khởi động Nginx service
+─────────────────────────────────────────────────────────────────────────────
+# Reload systemd
+systemctl daemon-reload
+
+# Enable nginx service
+systemctl enable nginx
+
+# Start nginx
+systemctl start nginx
+
+# Kiểm tra status
+systemctl status nginx
+
+# Kiểm tra nginx đang listen trên port nào
+netstat -tulpn | grep nginx
+
+Bước 9: Kiểm tra cấu hình
+─────────────────────────────────────────────────────────────────────────────
+# Test nginx configuration
+nginx -t
+
+# Kiểm tra logs nếu có lỗi
+tail -f /var/log/nginx/error.log
+
+# Kiểm tra access logs
+tail -f /var/log/nginx/access.log
+
+═══════════════════════════════════════════════════════════════════════════════
+PHẦN 2: TẠO GIAO DIỆN WEB VIEWER CHO KHÁCH XEM STREAM
+═══════════════════════════════════════════════════════════════════════════════
+
+Bước 10: Tạo file index.html với player chuyên nghiệp
+─────────────────────────────────────────────────────────────────────────────
+cat > /var/www/html/index.html << 'EOF'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🎥 Live Stream - OBS + Nginx RTMP</title>
+    <link href="https://vjs.zencdn.net/8.5.2/video.min.css" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            color: white;
+            overflow-x: hidden;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .header h1 {
+            font-size: 3rem;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+            background: linear-gradient(45deg, #ff6b6b, #4ecdc4, #45b7d1);
+            background-size: 200% 200%;
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            animation: gradientShift 3s ease infinite;
+        }
+
+        @keyframes gradientShift {
+            0%, 100% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+        }
+
+        .subtitle {
+            font-size: 1.3rem;
+            opacity: 0.9;
+            margin-bottom: 10px;
+        }
+
+        .live-indicator {
+            display: inline-flex;
+            align-items: center;
+            background: rgba(255, 0, 0, 0.8);
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-weight: bold;
+            margin-top: 10px;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+
+        .live-dot {
+            width: 12px;
+            height: 12px;
+            background: white;
+            border-radius: 50%;
+            margin-right: 8px;
+            animation: blink 1s infinite;
+        }
+
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+
+        .video-container {
+            background: rgba(0,0,0,0.3);
+            border-radius: 20px;
+            padding: 20px;
+            margin: 30px 0;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .video-wrapper {
+            position: relative;
+            background: #000;
+            border-radius: 15px;
+            overflow: hidden;
+            box-shadow: 0 8px 25px rgba(0,0,0,0.4);
+        }
+
+        #videoPlayer {
+            width: 100%;
+            max-width: 100%;
+            height: auto;
+            display: block;
+        }
+
+        .controls-panel {
+            display: flex;
+            justify-content: center;
+            gap: 15px;
+            margin-top: 20px;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            background: rgba(255,255,255,0.15);
+            border: 2px solid rgba(255,255,255,0.3);
+            color: white;
+            padding: 12px 24px;
+            border-radius: 25px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(10px);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn:hover {
+            background: rgba(255,255,255,0.25);
+            border-color: rgba(255,255,255,0.5);
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+        }
+
+        .btn:active {
+            transform: translateY(0);
+        }
+
+        .btn.primary {
+            background: linear-gradient(45deg, #ff6b6b, #4ecdc4);
+            border-color: transparent;
+        }
+
+        .btn.primary:hover {
+            background: linear-gradient(45deg, #ff5252, #26d0ce);
+        }
+
+        .status {
+            text-align: center;
+            margin: 20px 0;
+            padding: 15px;
+            border-radius: 15px;
+            font-weight: bold;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(10px);
+        }
+
+        .status.loading {
+            background: rgba(255, 193, 7, 0.2);
+            border: 2px solid #ffc107;
+            color: #ffc107;
+        }
+
+        .status.live {
+            background: rgba(40, 167, 69, 0.2);
+            border: 2px solid #28a745;
+            color: #28a745;
+        }
+
+        .status.error {
+            background: rgba(220, 53, 69, 0.2);
+            border: 2px solid #dc3545;
+            color: #dc3545;
+        }
+
+        .status.offline {
+            background: rgba(108, 117, 125, 0.2);
+            border: 2px solid #6c757d;
+            color: #6c757d;
+        }
+
+        .info-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-top: 30px;
+        }
+
+        .info-card {
+            background: rgba(255,255,255,0.1);
+            border-radius: 15px;
+            padding: 20px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.1);
+            transition: transform 0.3s ease;
+        }
+
+        .info-card:hover {
+            transform: translateY(-5px);
+        }
+
+        .info-card h3 {
+            color: #ffc107;
+            margin-bottom: 15px;
+            font-size: 1.3rem;
+        }
+
+        .info-card ul {
+            list-style: none;
+        }
+
+        .info-card li {
+            margin: 8px 0;
+            padding: 5px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .info-card li:last-child {
+            border-bottom: none;
+        }
+
+        .loading-spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(255,255,255,.3);
+            border-radius: 50%;
+            border-top-color: #fff;
+            animation: spin 1s ease-in-out infinite;
+            margin-right: 10px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .quality-selector {
+            margin: 15px 0;
+            text-align: center;
+        }
+
+        .quality-selector select {
+            background: rgba(0,0,0,0.5);
+            color: white;
+            border: 2px solid rgba(255,255,255,0.3);
+            border-radius: 10px;
+            padding: 8px 15px;
+            font-size: 14px;
+        }
+
+        .stats-overlay {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(0,0,0,0.7);
+            color: white;
+            padding: 8px 12px;
+            border-radius: 8px;
+            font-size: 12px;
+            z-index: 10;
+        }
+
+        @media (max-width: 768px) {
+            .header h1 {
+                font-size: 2rem;
+            }
+            
+            .controls-panel {
+                flex-direction: column;
+                align-items: center;
+            }
+            
+            .btn {
+                width: 200px;
+                justify-content: center;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎥 Live Stream</h1>
+            <p class="subtitle">OBS Studio + Nginx RTMP Streaming</p>
+            <div class="live-indicator" id="liveIndicator" style="display: none;">
+                <div class="live-dot"></div>
+                LIVE
+            </div>
+        </div>
+
+        <div class="video-container">
+            <div class="video-wrapper">
+                <div class="stats-overlay" id="statsOverlay" style="display: none;">
+                    <div id="statsText">Connecting...</div>
+                </div>
+                <video 
+                    id="videoPlayer"
+                    class="video-js vjs-default-skin"
+                    controls
+                    preload="auto"
+                    data-setup='{"fluid": true, "responsive": true}'
+                    poster="data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iODAwIiBoZWlnaHQ9IjQ1MCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxsPSIjMzMzIi8+PHRleHQgeD0iNTAlIiB5PSI1MCUiIGZvbnQtZmFtaWx5PSJBcmlhbCIgZm9udC1zaXplPSIyNCIgZmlsbD0iI2ZmZiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZHk9Ii4zZW0iPldhaXRpbmcgZm9yIHN0cmVhbS4uLjwvdGV4dD48L3N2Zz4=">
+                    <p class="vjs-no-js">
+                        To view this video please enable JavaScript, and consider upgrading to a web browser that
+                        <a href="https://videojs.com/html5-video-support/" target="_blank">supports HTML5 video</a>.
+                    </p>
+                </video>
+            </div>
+
+            <div class="quality-selector">
+                <label for="qualitySelect" style="margin-right: 10px;">Quality:</label>
+                <select id="qualitySelect">
+                    <option value="auto">Auto</option>
+                    <option value="hd">HD (Original)</option>
+                    <option value="sd">SD (Transcoded)</option>
+                </select>
+            </div>
+
+            <div class="controls-panel">
+                <button class="btn primary" onclick="refreshStream()">
+                    🔄 Refresh Stream
+                </button>
+                <button class="btn" onclick="toggleFullscreen()">
+                    📺 Fullscreen
+                </button>
+                <button class="btn" onclick="toggleMute()">
+                    🔊 Mute/Unmute
+                </button>
+                <button class="btn" onclick="showStats()">
+                    📊 Stats
+                </button>
+            </div>
+        </div>
+
+        <div id="status" class="status loading">
+            <div class="loading-spinner"></div>
+            🔄 Connecting to stream...
+        </div>
+
+        <div class="info-grid">
+            <div class="info-card">
+                <h3>📋 Stream Information</h3>
+                <ul>
+                    <li><strong>Server:</strong> 45.76.190.6</li>
+                    <li><strong>RTMP Port:</strong> 1935</li>
+                    <li><strong>Protocol:</strong> HLS (HTTP Live Streaming)</li>
+                    <li><strong>Supported Quality:</strong> Up to 4K @ 60 FPS</li>
+                    <li><strong>Latency:</strong> ~2-5 seconds</li>
+                    <li><strong>Compatibility:</strong> All browsers, mobile devices</li>
+                </ul>
+            </div>
+
+            <div class="info-card">
+                <h3>🎮 OBS Studio Settings</h3>
+                <ul>
+                    <li><strong>Stream Type:</strong> Custom Streaming Server</li>
+                    <li><strong>URL:</strong> rtmp://45.76.190.6/live</li>
+                    <li><strong>Stream Key:</strong> your_stream_key</li>
+                    <li><strong>Video Bitrate:</strong> 2500-6000 kbps</li>
+                    <li><strong>Audio Bitrate:</strong> 160 kbps</li>
+                    <li><strong>FPS:</strong> 30-60 FPS</li>
+                </ul>
+            </div>
+
+            <div class="info-card">
+                <h3>🔧 Troubleshooting</h3>
+                <ul>
+                    <li>Make sure OBS is streaming to the server</li>
+                    <li>Check your internet connection</li>
+                    <li>Try refreshing the page</li>
+                    <li>Verify the stream key is correct</li>
+                    <li>Check server status at /stats</li>
+                    <li>Contact admin if issues persist</li>
+                </ul>
+            </div>
+
+            <div class="info-card">
+                <h3>🌐 Share This Stream</h3>
+                <ul>
+                    <li><strong>Direct Link:</strong> http://45.76.190.6</li>
+                    <li><strong>HLS URL:</strong> http://45.76.190.6/hls/your_stream_key.m3u8</li>
+                    <li><strong>Mobile Friendly:</strong> ✅ Yes</li>
+                    <li><strong>Works on:</strong> PC, Mobile, Smart TV</li>
+                    <li><strong>No plugins required</strong></li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <!-- Video.js JavaScript -->
+    <script src="https://vjs.zencdn.net/8.5.2/video.min.js"></script>
+    
+    <script>
+        let player;
+        let currentStreamKey = 'your_stream_key'; // Default stream key
+        let statsInterval;
+        let streamCheckInterval;
+
+        // Initialize Video.js player
+        document.addEventListener('DOMContentLoaded', function() {
+            player = videojs('videoPlayer', {
+                controls: true,
+                fluid: true,
+                responsive: true,
+                preload: 'auto',
+                autoplay: 'muted',
+                liveui: true,
+                html5: {
+                    hlsjs: {
+                        enableWorker: true,
+                        lowLatencyMode: true
+                    }
+                }
+            });
+
+            // Initialize stream
+            initializeStream();
+            
+            // Check for stream every 10 seconds
+            streamCheckInterval = setInterval(checkStreamStatus, 10000);
+            
+            // Quality selector
+            document.getElementById('qualitySelect').addEventListener('change', function(e) {
+                switchQuality(e.target.value);
+            });
+        });
+
+        function initializeStream() {
+            updateStatus('Connecting to stream...', 'loading');
+            
+            // Try to detect stream key from URL parameters
+            const urlParams = new URLSearchParams(window.location.search);
+            const streamKey = urlParams.get('stream') || urlParams.get('key') || 'your_stream_key';
+            currentStreamKey = streamKey;
+            
+            loadStream('auto');
+        }
+
+        function loadStream(quality) {
+            let streamUrl;
+            
+            switch(quality) {
+                case 'hd':
+                    streamUrl = `/hls/${currentStreamKey}.m3u8`;
+                    break;
+                case 'sd':
+                    streamUrl = `/hls_hd/${currentStreamKey}.m3u8`;
+                    break;
+                default:
+                    streamUrl = `/hls/${currentStreamKey}.m3u8`;
+            }
+            
+            console.log('Loading stream:', streamUrl);
+            
+            player.src({
+                src: streamUrl,
+                type: 'application/x-mpegURL'
+            });
+            
+            // Event listeners
+            player.on('loadstart', function() {
+                updateStatus('Loading stream...', 'loading');
+            });
+            
+            player.on('canplay', function() {
+                updateStatus('🔴 LIVE - Stream is active', 'live');
+                showLiveIndicator(true);
+                startStatsUpdate();
+            });
+            
+            player.on('error', function(e) {
+                console.error('Player error:', e);
+                updateStatus('Stream offline or unavailable', 'error');
+                showLiveIndicator(false);
+                stopStatsUpdate();
+            });
+            
+            player.on('waiting', function() {
+                updateStatus('Buffering...', 'loading');
+            });
+            
+            player.on('playing', function() {
+                updateStatus('🔴 LIVE - Stream is active', 'live');
+                showLiveIndicator(true);
+            });
+            
+            player.on('ended', function() {
+                updateStatus('Stream ended', 'offline');
+                showLiveIndicator(false);
+            });
+        }
+
+        function updateStatus(message, type) {
+            const statusElement = document.getElementById('status');
+            statusElement.className = `status ${type}`;
+            
+            let icon = '';
+            switch(type) {
+                case 'loading': icon = '<div class="loading-spinner"></div>🔄'; break;
+                case 'live': icon = '🔴'; break;
+                case 'error': icon = '❌'; break;
+                case 'offline': icon = '⭕'; break;
+            }
+            
+            statusElement.innerHTML = icon + ' ' + message;
+        }
+
+        function showLiveIndicator(show) {
+            const indicator = document.getElementById('liveIndicator');
+            indicator.style.display = show ? 'inline-flex' : 'none';
+        }
+
+        function refreshStream() {
+            console.log('Refreshing stream...');
+            updateStatus('Refreshing stream...', 'loading');
+            showLiveIndicator(false);
+            
+            // Reload the current stream
+            const currentQuality = document.getElementById('qualitySelect').value;
+            loadStream(currentQuality);
+        }
+
+        function switchQuality(quality) {
+            console.log('Switching to quality:', quality);
+            loadStream(quality);
+        }
+
+        function toggleFullscreen() {
+            if (player.isFullscreen()) {
+                player.exitFullscreen();
+            } else {
+                player.requestFullscreen();
+            }
+        }
+
+        function toggleMute() {
+            player.muted(!player.muted());
+        }
+
+        function startStatsUpdate() {
+            if (statsInterval) clearInterval(statsInterval);
+            
+            statsInterval = setInterval(function() {
+                if (player && !player.paused()) {
+                    const stats = {
+                        currentTime: Math.floor(player.currentTime()),
+                        buffered: player.bufferedEnd(),
+                        bandwidth: 'Unknown'
+                    };
+                    
+                    document.getElementById('statsText').innerHTML = 
+                        `Live | Buffer: ${Math.max(0, stats.buffered - stats.currentTime).toFixed(1)}s`;
+                    document.getElementById('statsOverlay').style.display = 'block';
+                }
+            }, 1000);
+        }
+
+        function stopStatsUpdate() {
+            if (statsInterval) {
+                clearInterval(statsInterval);
+                statsInterval = null;
+            }
+            document.getElementById('statsOverlay').style.display = 'none';
+        }
+
+        function showStats() {
+            const statsOverlay = document.getElementById('statsOverlay');
+            if (statsOverlay.style.display === 'none') {
+                startStatsUpdate();
+            } else {
+                stopStatsUpdate();
+            }
+        }
+
+        async function checkStreamStatus() {
+            try {
+                const response = await fetch('/api/stream');
+                const data = await response.json();
+                
+                // Process stream status data
+                console.log('Stream status:', data);
+                
+            } catch (error) {
+                console.log('Could not fetch stream status:', error);
+            }
+        }
+
+        // Auto-retry connection if stream fails
+        let retryCount = 0;
+        const maxRetries = 5;
+
+        function autoRetry() {
+            if (retryCount < maxRetries) {
+                retryCount++;
+                console.log(`Retry attempt ${retryCount}/${maxRetries}`);
+                setTimeout(() => {
+                    refreshStream();
+                }, 5000);
+            }
+        }
+
+        // Listen for stream errors and auto-retry
+        if (player) {
+            player.on('error', function() {
+                setTimeout(autoRetry, 3000);
+            });
+        }
+
+        // Reset retry count on successful play
+        if (player) {
+            player.on('playing', function() {
+                retryCount = 0;
+            });
+        }
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', function() {
+            if (streamCheckInterval) clearInterval(streamCheckInterval);
+            if (statsInterval) clearInterval(statsInterval);
+            if (player) player.dispose();
+        });
+    </script>
+</body>
+</html>
+EOF
+
+Bước 11: Thiết lập quyền cho web files
+─────────────────────────────────────────────────────────────────────────────
+# Set ownership
+chown -R nginx:nginx /var/www/html
+
+# Set permissions
+chmod 755 /var/www/html
+chmod 644 /var/www/html/index.html
+
+Bước 12: Optional - Tạo basic authentication cho stats
+─────────────────────────────────────────────────────────────────────────────
+# Cài đặt apache2-utils để có htpasswd
+apt install -y apache2-utils
+
+# Tạo user admin cho stats (thay đổi password)
+htpasswd -c /etc/nginx/.htpasswd admin
+
+# Set quyền cho file password
+chown nginx:nginx /etc/nginx/.htpasswd
+chmod 600 /etc/nginx/.htpasswd
+
+Bước 13: Restart và kiểm tra final
+─────────────────────────────────────────────────────────────────────────────
+# Test nginx configuration
+nginx -t
+
+# Restart nginx
+systemctl restart nginx
+
+# Kiểm tra status
+systemctl status nginx
+
+# Kiểm tra ports
+netstat -tulpn | grep nginx
+
+# Test web server
+curl -I http://localhost/
+
+═══════════════════════════════════════════════════════════════════════════════
+PHẦN 3: CÀI ĐẶT VÀ CẤU HÌNH OBS STUDIO TRÊN WINDOWS
+═══════════════════════════════════════════════════════════════════════════════
+
+Bước 14: Download và cài đặt OBS Studio
+─────────────────────────────────────────────────────────────────────────────
+1. Truy cập: https://obsproject.com/download
+2. Click "Download OBS Studio" cho Windows
+3. Chọn phiên bản 64-bit (khuyến nghị)
+4. Chạy file installer và làm theo hướng dẫn
+5. Khởi động OBS Studio
+
+Bước 15: Cấu hình OBS cho streaming chất lượng cao
+─────────────────────────────────────────────────────────────────────────────
+
+A. Cấu hình Video Settings:
+1. Click "Settings" (hoặc File → Settings)
+2. Chọn tab "Video":
+   - Base (Canvas) Resolution: 1920x1080 (hoặc resolution màn hình của bạn)
+   - Output (Scaled) Resolution: 1920x1080 (cho HD) hoặc 1280x720 (cho hiệu suất tốt hơn)
+   - Downscale Filter: Lanczos (Sharpened scaling, 36 samples)
+   - Common FPS Values: 30 hoặc 60 (tùy theo hiệu suất máy)
+
+B. Cấu hình Output Settings:
+1. Chọn tab "Output"
+2. Output Mode: Advanced
+3. Trong tab "Streaming":
+   - Audio Track: 1
+   - Encoder: 
+     * Hardware (NVENC) nếu có GPU NVIDIA: NVIDIA NVENC H.264
+     * Hardware (QuickSync) nếu có Intel iGPU: Intel Quick Sync Video H.264
+     * Software nếu không có: x264
+   
+   Cài đặt cho x264 (Software):
+   - Bitrate: 2500-6000 kbps (tùy theo upload speed)
+   - Keyframe Interval: 2 seconds
+   - CPU Usage Preset: veryfast (hoặc faster nếu CPU mạnh)
+   - Profile: high
+   - Tune: zerolatency
+   
+   Cài đặt cho NVENC (Hardware):
+   - Bitrate: 3000-8000 kbps
+   - Keyframe Interval: 2 seconds
+   - Preset: Quality
+   - Profile: high
+   - Look-ahead: Unchecked
+   - Psycho Visual Tuning: Checked
+
+C. Cấu hình Audio Settings:
+1. Chọn tab "Audio":
+   - Sample Rate: 48 khz
+   - Channels: Stereo
+   - Desktop Audio Device: Default (hoặc thiết bị audio chính)
+   - Mic/Auxiliary Audio Device: Default (nếu có microphone)
+
+Bước 16: Cấu hình Stream Settings
+─────────────────────────────────────────────────────────────────────────────
+1. Trong Settings, chọn tab "Stream":
+   - Service: Custom...
+   - Server: rtmp://45.76.190.6/live
+   - Stream Key: your_stream_key (có thể đặt bất kỳ tên gì, ví dụ: mystream, live, test)
+
+2. Click "OK" để lưu settings
+
+Bước 17: Thiết lập Scene và Sources
+─────────────────────────────────────────────────────────────────────────────
+
+A. Tạo Scene mới:
+1. Trong Sources panel, click dấu "+"
+2. Chọn loại source muốn thêm:
+
+   Để capture toàn bộ màn hình:
+   - Chọn "Display Capture"
+   - Đặt tên: "Desktop"
+   - Click OK → Create New → OK
+   - Chọn màn hình muốn capture
+
+   Để capture cửa sổ cụ thể:
+   - Chọn "Window Capture"  
+   - Đặt tên: "Chrome Window"
+   - Click OK → Create New → OK
+   - Window: Chọn cửa sổ Chrome
+   - Capture Method: Windows 10 (1903 and up)
+
+   Để capture webcam:
+   - Chọn "Video Capture Device"
+   - Đặt tên: "Webcam"
+   - Device: Chọn webcam
+   - Resolution: 1920x1080 hoặc cao nhất có thể
+
+B. Điều chỉnh Sources:
+1. Resize sources bằng cách kéo các góc
+2. Di chuyển bằng cách click và kéo
+3. Thay đổi thứ tự bằng cách kéo lên/xuống trong danh sách
+
+Bước 18: Tối ưu hóa cho hiệu suất
+─────────────────────────────────────────────────────────────────────────────
+
+A. Advanced Settings:
+1. Settings → Advanced:
+   - Process Priority: High
+   - Renderer: Direct3D 11
+   - Color Format: NV12
+   - Color Space: 709
+   - Color Range: Partial
+
+B. Hotkeys (optional):
+1. Settings → Hotkeys:
+   - Start Streaming: Ctrl+Shift+S
+   - Stop Streaming: Ctrl+Shift+T
+   - Start Recording: Ctrl+Shift+R
+
+C. Performance Tips:
+1. Đóng các ứng dụng không cần thiết
+2. Chạy OBS với quyền Administrator
+3. Tắt Windows Game Mode nếu có vấn đề
+4. Kiểm tra task manager để xem CPU/GPU usage
+
+═══════════════════════════════════════════════════════════════════════════════
+PHẦN 4: BẮT ĐẦU STREAMING VÀ KIỂM TRA
+═══════════════════════════════════════════════════════════════════════════════
+
+Bước 19: Bắt đầu streaming từ OBS
+─────────────────────────────────────────────────────────────────────────────
+1. Trong OBS Studio:
+   - Kiểm tra Preview có hiển thị đúng source không
+   - Click "Start Streaming" (góc dưới bên phải)
+   - Đợi khoảng 5-10 giây để stream khởi tạo
+
+2. Kiểm tra status trong OBS:
+   - Góc dưới bên phải sẽ hiện thông tin:
+     * "LIVE" indicator (màu đỏ)
+     * Bitrate hiện tại
+     * FPS output
+     * Dropped frames (nên là 0%)
+
+Bước 20: Kiểm tra stream trên web
+─────────────────────────────────────────────────────────────────────────────
+1. Mở browser và truy cập: http://45.76.190.6
+2. Kết quả mong đợi:
+   - Trang web load với video player đẹp
+   - Video tự động phát sau 5-10 giây
+   - Status hiển thị "LIVE - Stream is active"
+   - Có thể điều khiển volume, fullscreen
+
+3. Test trên mobile device:
+   - Mở browser trên điện thoại
+   - Truy cập cùng URL
+   - Stream sẽ hoạt động mượt mà
+
+Bước 21: Kiểm tra stream statistics
+─────────────────────────────────────────────────────────────────────────────
+1. Truy cập: http://45.76.190.6/stats
+2. Đăng nhập với username/password đã tạo ở Bước 12
+3. Kiểm tra:
+   - Number of clients connected
+   - Bitrate incoming
+   - Stream uptime
+   - Bandwidth usage
+
+Bước 22: Chia sẻ stream với mọi người
+─────────────────────────────────────────────────────────────────────────────
+📺 Link xem stream chính: http://45.76.190.6
+
+🔗 Link HLS direct (cho players khác): 
+   http://45.76.190.6/hls/your_stream_key.m3u8
+
+📱 Mobile friendly: Hoạt động trên tất cả thiết bị
+
+🌍 No geographic restrictions: Ai cũng có thể xem
+
+═══════════════════════════════════════════════════════════════════════════════
+PHẦN 5: TROUBLESHOOTING VÀ TỐI ƯU HÓA
+═══════════════════════════════════════════════════════════════════════════════
+
+Vấn đề thường gặp và cách khắc phục:
+
+Problem 1: OBS không connect được tới server
+─────────────────────────────────────────────────────────────────────────────
+Solution:
+- Kiểm tra firewall VPS: ufw status
+- Kiểm tra nginx service: systemctl status nginx
+- Kiểm tra port 1935: netstat -tulpn | grep 1935
+- Test connection: telnet 45.76.190.6 1935
+
+Problem 2: Video không hiển thị trên web
+─────────────────────────────────────────────────────────────────────────────
+Solution:
+- Kiểm tra HLS files được tạo: ls -la /var/www/html/hls/
+- Kiểm tra nginx logs: tail -f /var/log/nginx/error.log
+- Kiểm tra browser console (F12) để xem lỗi JavaScript
+- Thử refresh stream hoặc đổi browser
+
+Problem 3: Stream bị lag hoặc buffer
+─────────────────────────────────────────────────────────────────────────────
+Solution:
+- Giảm bitrate trong OBS (2500 kbps)
+- Giảm resolution xuống 720p
+- Giảm FPS xuống 30
+- Kiểm tra upload speed: speedtest.net
+- Đổi encoder sang Hardware (NVENC) nếu có
+
+Problem 4: Audio không có hoặc không sync
+─────────────────────────────────────────────────────────────────────────────
+Solution:
+- Kiểm tra Audio Mixer trong OBS
+- Desktop Audio device phải được chọn đúng
+- Audio bitrate: 160 kbps
+- Sample rate: 48 khz
+
+═══════════════════════════════════════════════════════════════════════════════
+PHẦN 6: NÂNG CAO VÀ TỐI ƯU HÓA
+═══════════════════════════════════════════════════════════════════════════════
+
+Bước 23: Cấu hình SSL/HTTPS (Optional nhưng khuyến nghị)
+─────────────────────────────────────────────────────────────────────────────
+# Cài đặt Certbot
+apt install -y certbot python3-certbot-nginx
+
+# Lấy SSL certificate (thay đổi domain)
+certbot --nginx -d yourdomain.com
+
+# Auto renewal
+crontab -e
+# Thêm dòng: 0 12 * * * /usr/bin/certbot renew --quiet
+
+Bước 24: Monitoring và Analytics
+─────────────────────────────────────────────────────────────────────────────
+# Cài đặt monitoring tools
+apt install -y htop iotop iftop
+
+# Monitor real-time
+htop          # CPU và RAM usage
+iotop         # Disk I/O
+iftop         # Network traffic
+
+# Log rotation cho nginx
+cat > /etc/logrotate.d/nginx << 'EOF'
+/var/log/nginx/*.log {
+    daily
+    missingok
+    rotate 14
+    compress
+    delaycompress
+    notifempty
+    create 0644 nginx nginx
+    postrotate
+        systemctl reload nginx
+    endscript
+}
+EOF
+
+Bước 25: Backup và Security
+─────────────────────────────────────────────────────────────────────────────
+# Backup cấu hình
+tar -czf nginx_rtmp_backup_$(date +%Y%m%d).tar.gz /etc/nginx/ /var/www/html/
+
+# Security headers (thêm vào server block)
+add_header X-Frame-Options "DENY";
+add_header X-Content-Type-Options "nosniff";
+add_header X-XSS-Protection "1; mode=block";
+add_header Strict-Transport-Security "max-age=31536000" always;
+
+# Fail2ban cho bảo vệ server
+apt install -y fail2ban
+
+═══════════════════════════════════════════════════════════════════════════════
+TỔNG KẾT VÀ HƯỚNG DẪN SỬ DỤNG HÀNG NGÀY
+═══════════════════════════════════════════════════════════════════════════════
+
+🎯 QUY TRÌNH SỬ DỤNG HÀNG NGÀY:
+
+1. **Khởi động stream:**
+   - Mở OBS Studio
+   - Kiểm tra Scene và Audio levels
+   - Click "Start Streaming"
+   - Đợi 5-10 giây để stream ổn định
+
+2. **Chia sẻ với khán giả:**
+   - Send link: http://45.76.190.6
+   - Stream hoạt động trên mọi thiết bị
+   - Không cần cài đặt gì thêm
+
+3. **Monitor stream:**
+   - Kiểm tra OBS stats (FPS, dropped frames)
+   - Truy cập /stats để xem viewer count
+   - Monitor server: htop, iftop
+
+4. **Kết thúc stream:**
+   - Click "Stop Streaming" trong OBS
+   - Stream sẽ tự động disconnect khỏi server
+
+🚀 THÔNG SỐ ĐỀ XUẤT CHO CHẤT LƯỢNG TỐI ƯU:
+
+**Cho stream HD chất lượng cao:**
+- Resolution: 1920x1080
+- FPS: 60
+- Bitrate: 6000 kbps
+- Encoder: NVENC (nếu có GPU NVIDIA)
+- Audio: 160 kbps, 48 khz
+
+**Cho stream ổn định (khuyến nghị):**
+- Resolution: 1280x720
+- FPS: 30
+- Bitrate: 2500 kbps
+- Encoder: Hardware encoding
+- Audio: 128 kbps, 44.1 khz
+
+**Cho mạng yếu:**
+- Resolution: 854x480
+- FPS: 30
+- Bitrate: 1000 kbps
+- Encoder: x264 veryfast
+- Audio: 96 kbps
+
+⚡ PERFORMANCE TIPS:
+
+✅ Sử dụng Hardware encoding (NVENC/QuickSync/AMF)
+✅ Đóng các ứng dụng không cần thiết khi stream
+✅ Chạy OBS với quyền Administrator
+✅ Kiểm tra upload speed trước khi stream (ít nhất 1.5x bitrate)
+✅ Monitor CPU usage (không nên quá 80%)
+✅ Kiểm tra dropped frames trong OBS (nên < 1%)
+
+🎥 KẾT QUẢ CUỐI CÙNG:
+
+✅ Server RTMP chuyên nghiệp trên VPS riêng
+✅ Stream chất lượng HD/4K với OBS Studio
+✅ Web viewer đẹp, responsive, tương thích mọi thiết bị  
+✅ Không giới hạn thời gian stream (24/7)
+✅ Không phụ thuộc YouTube/Twitch
+✅ Bandwidth không giới hạn
+✅ Độ trễ thấp (~2-5 giây)
+✅ Dễ dàng chia sẻ với bất kỳ ai
+
+🎉 CHÚC MỪNG! BẠN ĐÃ CÓ HỆ THỐNG STREAMING CHUYÊN NGHIỆP! 🎉
+
+═══════════════════════════════════════════════════════════════════════════════
+HẾT HƯỚNG DẪN - ENJOY YOUR STREAMING! 🚀
+═══════════════════════════════════════════════════════════════════════════════

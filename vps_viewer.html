@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🎥 Live Stream Viewer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: white;
+        }
+
+        .container {
+            text-align: center;
+            padding: 20px;
+            max-width: 1200px;
+            width: 100%;
+        }
+
+        h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .subtitle {
+            font-size: 1.2rem;
+            margin-bottom: 30px;
+            opacity: 0.9;
+        }
+
+        .video-container {
+            background: rgba(0,0,0,0.2);
+            border-radius: 15px;
+            padding: 20px;
+            margin: 20px 0;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+
+        #videoElement {
+            width: 100%;
+            max-width: 800px;
+            height: auto;
+            border-radius: 10px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+            background: #000;
+        }
+
+        .status {
+            margin: 20px 0;
+            padding: 15px;
+            border-radius: 10px;
+            font-weight: bold;
+            transition: all 0.3s ease;
+        }
+
+        .status.connecting {
+            background: rgba(255, 193, 7, 0.2);
+            border: 2px solid #ffc107;
+            color: #ffc107;
+        }
+
+        .status.connected {
+            background: rgba(40, 167, 69, 0.2);
+            border: 2px solid #28a745;
+            color: #28a745;
+        }
+
+        .status.error {
+            background: rgba(220, 53, 69, 0.2);
+            border: 2px solid #dc3545;
+            color: #dc3545;
+        }
+
+        .status.waiting {
+            background: rgba(23, 162, 184, 0.2);
+            border: 2px solid #17a2b8;
+            color: #17a2b8;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(255,255,255,.3);
+            border-radius: 50%;
+            border-top-color: #fff;
+            animation: spin 1s ease-in-out infinite;
+            margin-right: 10px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .info {
+            background: rgba(255,255,255,0.1);
+            border-radius: 10px;
+            padding: 15px;
+            margin-top: 20px;
+            text-align: left;
+        }
+
+        .info h3 {
+            margin-bottom: 10px;
+            color: #ffc107;
+        }
+
+        .info ul {
+            margin-left: 20px;
+        }
+
+        .info li {
+            margin: 5px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎥 Live Stream Viewer</h1>
+        <p class="subtitle">WebRTC Real-time Screen Streaming</p>
+
+        <div class="video-container">
+            <img id="videoElement" alt="Live Stream" />
+        </div>
+
+        <div id="status" class="status waiting">
+            <div class="loading"></div>
+            🔄 Connecting to stream server...
+        </div>
+
+        <div class="info">
+            <h3>📋 Stream Information</h3>
+            <ul>
+                <li><strong>Server:</strong> 45.76.190.6:3000</li>
+                <li><strong>Protocol:</strong> WebSocket + WebRTC</li>
+                <li><strong>Quality:</strong> 800p @ 5 FPS (Optimized for performance)</li>
+                <li><strong>Latency:</strong> ~200-500ms</li>
+            </ul>
+        </div>
+    </div>
+
+    <!-- Socket.IO Client -->
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        console.log('🚀 Starting WebRTC Stream Viewer...');
+        
+        const videoElement = document.getElementById('videoElement');
+        const statusElement = document.getElementById('status');
+        
+        // Kết nối Socket.IO
+        const socket = io();
+        
+        function updateStatus(message, type = 'waiting') {
+            statusElement.className = `status ${type}`;
+            statusElement.innerHTML = getStatusIcon(type) + ' ' + message;
+        }
+        
+        function getStatusIcon(type) {
+            switch(type) {
+                case 'connecting': return '<div class="loading"></div>🔄';
+                case 'connected': return '✅';
+                case 'error': return '❌';
+                case 'waiting': return '<div class="loading"></div>🔄';
+                default: return '📡';
+            }
+        }
+        
+        // Socket.IO Events
+        socket.on('connect', () => {
+            console.log('✅ Connected to signaling server');
+            updateStatus('Connected to server - Registering as viewer...', 'connecting');
+            
+            // Đăng ký là viewer
+            socket.emit('viewer');
+        });
+        
+        socket.on('disconnect', () => {
+            console.log('❌ Disconnected from signaling server');
+            updateStatus('Disconnected from server - Reconnecting...', 'error');
+        });
+        
+        socket.on('broadcaster-connected', () => {
+            console.log('📺 Broadcaster connected');
+            updateStatus('Broadcaster connected - Waiting for video...', 'connected');
+        });
+        
+        socket.on('broadcaster-disconnected', () => {
+            console.log('📺 Broadcaster disconnected');
+            updateStatus('Broadcaster disconnected - Waiting for reconnection...', 'waiting');
+            videoElement.src = '';
+        });
+        
+        // Nhận video frames
+        socket.on('video_frame', (data) => {
+            try {
+                const frameData = JSON.parse(data);
+                if (frameData.type === 'video_frame' && frameData.data) {
+                    // Hiển thị frame dưới dạng base64 image
+                    videoElement.src = `data:image/jpeg;base64,${frameData.data}`;
+                    
+                    // Cập nhật status
+                    updateStatus(`🔴 LIVE - Frame #${frameData.frame || 0}`, 'connected');
+                }
+            } catch (error) {
+                console.error('❌ Error processing video frame:', error);
+            }
+        });
+        
+        // Error handling
+        socket.on('connect_error', (error) => {
+            console.error('❌ Connection error:', error);
+            updateStatus('Connection failed - Please check if broadcaster is running', 'error');
+        });
+        
+        // Video element error handling
+        videoElement.onerror = () => {
+            console.error('❌ Video element error');
+        };
+        
+        videoElement.onload = () => {
+            console.log('✅ Video frame loaded successfully');
+        };
+        
+        // Initial status
+        updateStatus('Initializing connection...', 'connecting');
+    </script>
+</body>
+</html>

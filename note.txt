@@ -4,4 +4,14 @@ sau đó tạo thành 2 link web, người khác truy cập link đó là xem dc
 * giao diện tool đơn giản 2 nút set cho 2 khung hình (để kéo chọn vùng), 2 nút start (bắt đầu stream cho từng vùng)
 * hiển thị live luôn 2 vùng đó nhỏ gọn bên dưới hỗ trợ cho admin dễ kiểm soát 
 * hiển thị link đi kèm tương ứng bên dưới. nhấn vào là copy link luôn.
-khi truy cập link sẽ xem dc livestream khung hình tương ứngg
+khi truy cập link sẽ xem dc livestream khung hình tương ứng
+
+
+[Windows PC] --WebRTC--> [VPS] --HTTP Stream--> [Public Web]
+
+VPS
+IP : 45.76.190.6 
+User: root
+Pass: C4k#$up3J{LzX6%Y
+
+dùng powershell: ssh root@45.76.190.6

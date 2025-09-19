@@ -1,0 +1,859 @@
+═══════════════════════════════════════════════════════════════════════════════
+🎥 HƯỚNG DẪN STREAMING VỚI FFMPEG + NGINX-RTMP (30+ FPS)
+═══════════════════════════════════════════════════════════════════════════════
+
+📌 TỔNG QUAN GIẢI PHÁP:
+- Windows: FFmpeg capture màn hình → push RTMP stream lên VPS
+- VPS: Nginx-RTMP nhận stream → xuất HLS cho web viewer  
+- Viewer: Truy cập http://VPS_IP để xem live stream 30+ FPS
+
+🎯 ƯU ĐIỂM:
+✅ Streaming 30+ FPS mượt mà (thay vì 5 FPS)
+✅ Chất lượng cao với H.264 hardware encoding
+✅ Độ trễ thấp (~1-3 giây)
+✅ Nhiều người xem cùng lúc ổn định
+✅ Sử dụng FFmpeg (công cụ streaming hàng đầu)
+✅ Dễ mở rộng và tùy chỉnh
+
+═══════════════════════════════════════════════════════════════════════════════
+PHẦN 1: CÀI ĐẶT VPS UBUNTU (NGINX + RTMP MODULE)
+═══════════════════════════════════════════════════════════════════════════════
+
+Bước 1: SSH vào VPS
+─────────────────────────────────────────────────────────────────────────────
+ssh root@45.76.190.6
+
+Bước 2: Cập nhật hệ thống
+─────────────────────────────────────────────────────────────────────────────
+apt update && apt upgrade -y
+
+Bước 3: Cài đặt các dependencies cần thiết
+─────────────────────────────────────────────────────────────────────────────
+apt install -y build-essential libpcre3 libpcre3-dev zlib1g zlib1g-dev libssl-dev libgd-dev libxml2 libxml2-dev uuid-dev
+
+Bước 4: Tạo thư mục làm việc
+─────────────────────────────────────────────────────────────────────────────
+mkdir -p ~/nginx_build && cd ~/nginx_build
+
+Bước 5: Download Nginx source code
+─────────────────────────────────────────────────────────────────────────────
+wget http://nginx.org/download/nginx-1.24.0.tar.gz
+tar -xzf nginx-1.24.0.tar.gz
+
+Bước 6: Download nginx-rtmp-module
+─────────────────────────────────────────────────────────────────────────────
+wget https://github.com/arut/nginx-rtmp-module/archive/master.zip
+apt install -y unzip
+unzip master.zip
+
+Bước 7: Compile Nginx với RTMP module
+─────────────────────────────────────────────────────────────────────────────
+cd nginx-1.24.0
+
+./configure \
+  --prefix=/etc/nginx \
+  --sbin-path=/usr/sbin/nginx \
+  --modules-path=/usr/lib/nginx/modules \
+  --conf-path=/etc/nginx/nginx.conf \
+  --error-log-path=/var/log/nginx/error.log \
+  --http-log-path=/var/log/nginx/access.log \
+  --pid-path=/var/run/nginx.pid \
+  --lock-path=/var/run/nginx.lock \
+  --http-client-body-temp-path=/var/cache/nginx/client_temp \
+  --http-proxy-temp-path=/var/cache/nginx/proxy_temp \
+  --http-fastcgi-temp-path=/var/cache/nginx/fastcgi_temp \
+  --http-uwsgi-temp-path=/var/cache/nginx/uwsgi_temp \
+  --http-scgi-temp-path=/var/cache/nginx/scgi_temp \
+  --with-perl_modules_path=/usr/share/perl/5.34.0 \
+  --user=nginx \
+  --group=nginx \
+  --with-compat \
+  --with-file-aio \
+  --with-threads \
+  --with-http_addition_module \
+  --with-http_auth_request_module \
+  --with-http_dav_module \
+  --with-http_flv_module \
+  --with-http_gunzip_module \
+  --with-http_gzip_static_module \
+  --with-http_mp4_module \
+  --with-http_random_index_module \
+  --with-http_realip_module \
+  --with-http_secure_link_module \
+  --with-http_slice_module \
+  --with-http_ssl_module \
+  --with-http_stub_status_module \
+  --with-http_sub_module \
+  --with-http_v2_module \
+  --with-stream \
+  --with-stream_realip_module \
+  --with-stream_ssl_module \
+  --with-stream_ssl_preread_module \
+  --add-module=../nginx-rtmp-module-master
+
+make && make install
+
+Bước 8: Tạo user nginx
+─────────────────────────────────────────────────────────────────────────────
+useradd --system --home /var/cache/nginx --shell /sbin/nologin --comment "nginx user" --user-group nginx
+
+Bước 9: Tạo thư mục cache
+─────────────────────────────────────────────────────────────────────────────
+mkdir -p /var/cache/nginx
+chown -R nginx:nginx /var/cache/nginx
+
+Bước 10: Tạo thư mục cho HLS streams
+─────────────────────────────────────────────────────────────────────────────
+mkdir -p /var/www/html/hls
+chown -R nginx:nginx /var/www/html/hls
+chmod 755 /var/www/html/hls
+
+Bước 11: Tạo file cấu hình nginx.conf
+─────────────────────────────────────────────────────────────────────────────
+cat > /etc/nginx/nginx.conf << 'EOF'
+user nginx;
+worker_processes auto;
+error_log /var/log/nginx/error.log;
+pid /run/nginx.pid;
+
+events {
+    worker_connections 1024;
+}
+
+# RTMP Configuration
+rtmp {
+    server {
+        listen 1935;
+        chunk_size 4096;
+        allow publish all;
+
+        application live {
+            live on;
+            
+            # Enable HLS
+            hls on;
+            hls_path /var/www/html/hls;
+            hls_fragment 1s;
+            hls_playlist_length 3s;
+            
+            # Enable recording (optional)
+            record all;
+            record_path /var/recordings;
+            record_unique on;
+            record_suffix .flv;
+        }
+    }
+}
+
+# HTTP Configuration
+http {
+    log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                    '$status $body_bytes_sent "$http_referer" '
+                    '"$http_user_agent" "$http_x_forwarded_for"';
+
+    access_log /var/log/nginx/access.log main;
+
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    keepalive_timeout 65;
+    types_hash_max_size 2048;
+
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+
+    server {
+        listen 80;
+        server_name _;
+        
+        # CORS headers for HLS streaming
+        add_header Access-Control-Allow-Origin *;
+        add_header Access-Control-Allow-Methods 'GET, POST, OPTIONS';
+        add_header Access-Control-Allow-Headers 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range';
+
+        # Serve HLS files
+        location /hls {
+            types {
+                application/vnd.apple.mpegurl m3u8;
+                video/mp2t ts;
+            }
+            root /var/www/html;
+            expires -1;
+            add_header Cache-Control no-cache;
+        }
+
+        # Serve main page
+        location / {
+            root /var/www/html;
+            index index.html;
+        }
+
+        # RTMP statistics (optional)
+        location /stat {
+            rtmp_stat all;
+            rtmp_stat_stylesheet stat.xsl;
+        }
+
+        location /stat.xsl {
+            root /etc/nginx/;
+        }
+    }
+}
+EOF
+
+Bước 12: Tạo systemd service
+─────────────────────────────────────────────────────────────────────────────
+cat > /etc/systemd/system/nginx.service << 'EOF'
+[Unit]
+Description=The nginx HTTP and reverse proxy server
+Documentation=http://nginx.org/en/docs/
+After=network.target remote-fs.target nss-lookup.target
+
+[Service]
+Type=forking
+PIDFile=/run/nginx.pid
+ExecStartPre=/usr/sbin/nginx -t
+ExecStart=/usr/sbin/nginx
+ExecReload=/bin/kill -s HUP $MAINPID
+KillSignal=SIGQUIT
+TimeoutStopSec=5
+KillMode=mixed
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+Bước 13: Tạo thư mục recordings (optional)
+─────────────────────────────────────────────────────────────────────────────
+mkdir -p /var/recordings
+chown -R nginx:nginx /var/recordings
+
+Bước 14: Cấu hình firewall
+─────────────────────────────────────────────────────────────────────────────
+ufw allow 80/tcp
+ufw allow 1935/tcp
+ufw status
+
+Bước 15: Khởi động Nginx
+─────────────────────────────────────────────────────────────────────────────
+systemctl daemon-reload
+systemctl enable nginx
+systemctl start nginx
+systemctl status nginx
+
+Bước 16: Kiểm tra Nginx đang chạy
+─────────────────────────────────────────────────────────────────────────────
+# Kiểm tra port 80
+netstat -tulpn | grep :80
+
+# Kiểm tra port 1935 (RTMP)
+netstat -tulpn | grep :1935
+
+# Kiểm tra log
+tail -f /var/log/nginx/error.log
+
+═══════════════════════════════════════════════════════════════════════════════
+PHẦN 2: TẠO WEB VIEWER CHO HLS STREAM
+═══════════════════════════════════════════════════════════════════════════════
+
+Bước 17: Tạo file index.html với HLS player
+─────────────────────────────────────────────────────────────────────────────
+cat > /var/www/html/index.html << 'EOF'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🎥 Live Stream - FFmpeg + Nginx RTMP</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: white;
+            padding: 20px;
+        }
+
+        .container {
+            text-align: center;
+            max-width: 1200px;
+            width: 100%;
+        }
+
+        h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .subtitle {
+            font-size: 1.2rem;
+            margin-bottom: 30px;
+            opacity: 0.9;
+        }
+
+        .video-container {
+            background: rgba(0,0,0,0.2);
+            border-radius: 15px;
+            padding: 20px;
+            margin: 20px 0;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+
+        #videoPlayer {
+            width: 100%;
+            max-width: 1000px;
+            height: auto;
+            border-radius: 10px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+            background: #000;
+        }
+
+        .status {
+            margin: 20px 0;
+            padding: 15px;
+            border-radius: 10px;
+            font-weight: bold;
+            transition: all 0.3s ease;
+        }
+
+        .status.loading {
+            background: rgba(255, 193, 7, 0.2);
+            border: 2px solid #ffc107;
+            color: #ffc107;
+        }
+
+        .status.live {
+            background: rgba(40, 167, 69, 0.2);
+            border: 2px solid #28a745;
+            color: #28a745;
+        }
+
+        .status.error {
+            background: rgba(220, 53, 69, 0.2);
+            border: 2px solid #dc3545;
+            color: #dc3545;
+        }
+
+        .controls {
+            margin: 20px 0;
+        }
+
+        .btn {
+            background: rgba(255,255,255,0.1);
+            border: 2px solid rgba(255,255,255,0.3);
+            color: white;
+            padding: 10px 20px;
+            margin: 5px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: all 0.3s ease;
+        }
+
+        .btn:hover {
+            background: rgba(255,255,255,0.2);
+            border-color: rgba(255,255,255,0.5);
+        }
+
+        .info {
+            background: rgba(255,255,255,0.1);
+            border-radius: 10px;
+            padding: 15px;
+            margin-top: 20px;
+            text-align: left;
+        }
+
+        .info h3 {
+            margin-bottom: 10px;
+            color: #ffc107;
+        }
+
+        .info ul {
+            margin-left: 20px;
+        }
+
+        .info li {
+            margin: 5px 0;
+        }
+
+        .loading-spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(255,255,255,.3);
+            border-radius: 50%;
+            border-top-color: #fff;
+            animation: spin 1s ease-in-out infinite;
+            margin-right: 10px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎥 Live Stream Viewer</h1>
+        <p class="subtitle">FFmpeg + Nginx RTMP Streaming (30+ FPS)</p>
+
+        <div class="video-container">
+            <video id="videoPlayer" controls autoplay muted>
+                <source src="/hls/stream.m3u8" type="application/x-mpegURL">
+                Your browser does not support HLS video playback.
+            </video>
+        </div>
+
+        <div id="status" class="status loading">
+            <div class="loading-spinner"></div>
+            🔄 Loading stream...
+        </div>
+
+        <div class="controls">
+            <button class="btn" onclick="refreshStream()">🔄 Refresh Stream</button>
+            <button class="btn" onclick="toggleMute()">🔊 Toggle Mute</button>
+            <button class="btn" onclick="toggleFullscreen()">📺 Fullscreen</button>
+        </div>
+
+        <div class="info">
+            <h3>📋 Stream Information</h3>
+            <ul>
+                <li><strong>Server:</strong> 45.76.190.6</li>
+                <li><strong>RTMP Port:</strong> 1935</li>
+                <li><strong>HTTP Port:</strong> 80</li>
+                <li><strong>Stream URL:</strong> rtmp://45.76.190.6/live/stream</li>
+                <li><strong>HLS URL:</strong> /hls/stream.m3u8</li>
+                <li><strong>Protocol:</strong> HLS (HTTP Live Streaming)</li>
+                <li><strong>Quality:</strong> Up to 1080p @ 30+ FPS</li>
+                <li><strong>Latency:</strong> ~1-3 seconds</li>
+            </ul>
+        </div>
+
+        <div class="info">
+            <h3>🔧 Troubleshooting</h3>
+            <ul>
+                <li>If no video appears, make sure FFmpeg is running on Windows</li>
+                <li>Check that RTMP stream is being sent to: <code>rtmp://45.76.190.6/live/stream</code></li>
+                <li>Verify HLS files are being generated in: <code>/var/www/html/hls/</code></li>
+                <li>Check Nginx logs: <code>tail -f /var/log/nginx/error.log</code></li>
+            </ul>
+        </div>
+    </div>
+
+    <!-- HLS.js for browsers that don't support native HLS -->
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    <script>
+        const video = document.getElementById('videoPlayer');
+        const status = document.getElementById('status');
+        
+        function updateStatus(message, type = 'loading') {
+            status.className = `status ${type}`;
+            
+            let icon = '';
+            switch(type) {
+                case 'loading': icon = '<div class="loading-spinner"></div>🔄'; break;
+                case 'live': icon = '🔴'; break;
+                case 'error': icon = '❌'; break;
+            }
+            
+            status.innerHTML = icon + ' ' + message;
+        }
+
+        function initializePlayer() {
+            if (Hls.isSupported()) {
+                console.log('🎥 Using HLS.js for playback');
+                const hls = new Hls({
+                    enableWorker: true,
+                    lowLatencyMode: true,
+                    backBufferLength: 90
+                });
+                
+                hls.loadSource('/hls/stream.m3u8');
+                hls.attachMedia(video);
+                
+                hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                    console.log('✅ HLS manifest loaded');
+                    updateStatus('Stream connected - Starting playback...', 'live');
+                    video.play().catch(e => {
+                        console.warn('⚠️ Autoplay prevented:', e);
+                        updateStatus('Stream ready - Click play to start', 'live');
+                    });
+                });
+                
+                hls.on(Hls.Events.ERROR, (event, data) => {
+                    console.error('❌ HLS error:', data);
+                    if (data.fatal) {
+                        switch(data.type) {
+                            case Hls.ErrorTypes.NETWORK_ERROR:
+                                updateStatus('Network error - Retrying...', 'error');
+                                hls.startLoad();
+                                break;
+                            case Hls.ErrorTypes.MEDIA_ERROR:
+                                updateStatus('Media error - Retrying...', 'error');
+                                hls.recoverMediaError();
+                                break;
+                            default:
+                                updateStatus('Fatal error - Please refresh page', 'error');
+                                hls.destroy();
+                                break;
+                        }
+                    }
+                });
+                
+            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                console.log('🎥 Using native HLS support');
+                video.src = '/hls/stream.m3u8';
+                updateStatus('Stream connected - Starting playback...', 'live');
+                video.play().catch(e => {
+                    console.warn('⚠️ Autoplay prevented:', e);
+                    updateStatus('Stream ready - Click play to start', 'live');
+                });
+            } else {
+                console.error('❌ HLS not supported');
+                updateStatus('HLS not supported in this browser', 'error');
+            }
+        }
+
+        function refreshStream() {
+            console.log('🔄 Refreshing stream...');
+            updateStatus('Refreshing stream...', 'loading');
+            setTimeout(() => {
+                window.location.reload();
+            }, 1000);
+        }
+
+        function toggleMute() {
+            video.muted = !video.muted;
+            console.log('🔊 Mute:', video.muted);
+        }
+
+        function toggleFullscreen() {
+            if (video.requestFullscreen) {
+                video.requestFullscreen();
+            } else if (video.webkitRequestFullscreen) {
+                video.webkitRequestFullscreen();
+            } else if (video.msRequestFullscreen) {
+                video.msRequestFullscreen();
+            }
+        }
+
+        // Event listeners
+        video.addEventListener('loadstart', () => {
+            console.log('📺 Video load started');
+            updateStatus('Loading video...', 'loading');
+        });
+
+        video.addEventListener('canplay', () => {
+            console.log('✅ Video can play');
+            updateStatus('🔴 LIVE - Stream active', 'live');
+        });
+
+        video.addEventListener('error', (e) => {
+            console.error('❌ Video error:', e);
+            updateStatus('Video playback error', 'error');
+        });
+
+        video.addEventListener('waiting', () => {
+            console.log('⏳ Video buffering...');
+            updateStatus('Buffering...', 'loading');
+        });
+
+        video.addEventListener('playing', () => {
+            console.log('▶️ Video playing');
+            updateStatus('🔴 LIVE - Stream active', 'live');
+        });
+
+        // Initialize player when page loads
+        document.addEventListener('DOMContentLoaded', () => {
+            console.log('🚀 Initializing HLS player...');
+            updateStatus('Connecting to stream...', 'loading');
+            
+            // Wait a bit for HLS.js to load
+            setTimeout(initializePlayer, 1000);
+        });
+
+        // Auto-refresh every 30 seconds if stream fails
+        setInterval(() => {
+            if (video.readyState === 0 && !video.src) {
+                console.log('🔄 Auto-refreshing due to no stream...');
+                initializePlayer();
+            }
+        }, 30000);
+    </script>
+</body>
+</html>
+EOF
+
+Bước 18: Thiết lập quyền cho file HTML
+─────────────────────────────────────────────────────────────────────────────
+chown nginx:nginx /var/www/html/index.html
+chmod 644 /var/www/html/index.html
+
+Bước 19: Test web server
+─────────────────────────────────────────────────────────────────────────────
+# Kiểm tra web server có hoạt động không
+curl -I http://localhost/
+
+# Kết quả mong đợi: HTTP/1.1 200 OK
+
+═══════════════════════════════════════════════════════════════════════════════
+PHẦN 3: CÀI ĐẶT FFMPEG TRÊN WINDOWS
+═══════════════════════════════════════════════════════════════════════════════
+
+Bước 20: Download FFmpeg cho Windows
+─────────────────────────────────────────────────────────────────────────────
+1. Mở trình duyệt và truy cập: https://www.gyan.dev/ffmpeg/builds/
+2. Download "release builds" → "ffmpeg-release-essentials.zip"
+3. Hoặc download trực tiếp: https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
+
+Bước 21: Cài đặt FFmpeg
+─────────────────────────────────────────────────────────────────────────────
+1. Giải nén file zip vừa download
+2. Copy thư mục "ffmpeg-x.x.x-essentials_build" vào C:\
+3. Đổi tên thành "ffmpeg" để dễ nhớ
+4. Đường dẫn cuối cùng: C:\ffmpeg\bin\ffmpeg.exe
+
+Bước 22: Thêm FFmpeg vào PATH (Windows)
+─────────────────────────────────────────────────────────────────────────────
+1. Nhấn Windows + R, gõ "sysdm.cpl", nhấn Enter
+2. Chọn tab "Advanced" → "Environment Variables"
+3. Trong "System variables", tìm và chọn "Path" → "Edit"
+4. Nhấn "New" và thêm: C:\ffmpeg\bin
+5. Nhấn "OK" trên tất cả cửa sổ
+6. Mở PowerShell mới và test: ffmpeg -version
+
+Bước 23: Test FFmpeg installation
+─────────────────────────────────────────────────────────────────────────────
+# Mở PowerShell (Run as Administrator)
+ffmpeg -version
+
+# Kết quả mong đợi: Hiển thị thông tin version của FFmpeg
+
+═══════════════════════════════════════════════════════════════════════════════
+PHẦN 4: STREAMING TỪ WINDOWS LÊN VPS
+═══════════════════════════════════════════════════════════════════════════════
+
+Bước 24: Test streaming full desktop (30 FPS)
+─────────────────────────────────────────────────────────────────────────────
+# Mở PowerShell as Administrator
+ffmpeg -f gdigrab -framerate 30 -i desktop -c:v libx264 -preset veryfast -tune zerolatency -b:v 2M -maxrate 2M -bufsize 4M -f flv rtmp://45.76.190.6/live/stream
+
+# Giải thích parameters:
+# -f gdigrab: Sử dụng GDI+ để capture desktop Windows
+# -framerate 30: Capture 30 FPS
+# -i desktop: Input là desktop
+# -c:v libx264: Encode video bằng H.264
+# -preset veryfast: Preset nhanh để giảm độ trễ
+# -tune zerolatency: Tối ưu cho streaming real-time
+# -b:v 2M: Bitrate 2 Mbps
+# -maxrate 2M: Bitrate tối đa 2 Mbps
+# -bufsize 4M: Buffer size 4 MB
+# -f flv: Output format FLV cho RTMP
+
+Bước 25: Streaming cửa sổ Chrome cụ thể
+─────────────────────────────────────────────────────────────────────────────
+# Cách 1: Capture window by title (cần đổi title cho đúng)
+ffmpeg -f gdigrab -framerate 30 -i title="Google Chrome" -c:v libx264 -preset veryfast -tune zerolatency -b:v 2M -maxrate 2M -bufsize 4M -f flv rtmp://45.76.190.6/live/stream
+
+# Cách 2: Capture một vùng màn hình cụ thể (ví dụ: 1920x1080 từ góc trái trên)
+ffmpeg -f gdigrab -framerate 30 -offset_x 0 -offset_y 0 -video_size 1920x1080 -i desktop -c:v libx264 -preset veryfast -tune zerolatency -b:v 2M -maxrate 2M -bufsize 4M -f flv rtmp://45.76.190.6/live/stream
+
+Bước 26: Streaming với chất lượng cao hơn (1080p, 60 FPS)
+─────────────────────────────────────────────────────────────────────────────
+ffmpeg -f gdigrab -framerate 60 -i desktop -c:v libx264 -preset fast -tune zerolatency -b:v 5M -maxrate 5M -bufsize 10M -vf scale=1920:1080 -f flv rtmp://45.76.190.6/live/stream
+
+# Parameters cho chất lượng cao:
+# -framerate 60: 60 FPS
+# -b:v 5M: Bitrate 5 Mbps
+# -vf scale=1920:1080: Scale về 1080p
+
+Bước 27: Streaming với GPU encoding (nếu có NVIDIA GPU)
+─────────────────────────────────────────────────────────────────────────────
+# Sử dụng NVENC (NVIDIA GPU encoding) - nhanh hơn rất nhiều
+ffmpeg -f gdigrab -framerate 30 -i desktop -c:v h264_nvenc -preset fast -tune zerolatency -b:v 3M -maxrate 3M -bufsize 6M -f flv rtmp://45.76.190.6/live/stream
+
+# Nếu có AMD GPU, dùng:
+ffmpeg -f gdigrab -framerate 30 -i desktop -c:v h264_amf -preset fast -b:v 3M -maxrate 3M -bufsize 6M -f flv rtmp://45.76.190.6/live/stream
+
+═══════════════════════════════════════════════════════════════════════════════
+PHẦN 5: TẠO SCRIPT TỰ ĐỘNG CHO WINDOWS
+═══════════════════════════════════════════════════════════════════════════════
+
+Bước 28: Tạo batch script để dễ sử dụng
+─────────────────────────────────────────────────────────────────────────────
+Tạo file "stream_to_vps.bat" trên Desktop với nội dung:
+
+@echo off
+title FFmpeg RTMP Streaming to VPS
+echo ==========================================
+echo   FFmpeg RTMP Streaming to VPS
+echo ==========================================
+echo.
+echo VPS Server: 45.76.190.6
+echo RTMP URL: rtmp://45.76.190.6/live/stream
+echo Web Viewer: http://45.76.190.6
+echo.
+echo Starting stream in 3 seconds...
+timeout /t 3 /nobreak > nul
+
+echo Starting FFmpeg streaming...
+ffmpeg -f gdigrab -framerate 30 -i desktop -c:v libx264 -preset veryfast -tune zerolatency -b:v 2M -maxrate 2M -bufsize 4M -f flv rtmp://45.76.190.6/live/stream
+
+echo.
+echo Stream ended. Press any key to exit...
+pause > nul
+
+Bước 29: Tạo batch script cho Chrome window
+─────────────────────────────────────────────────────────────────────────────
+Tạo file "stream_chrome_to_vps.bat" trên Desktop:
+
+@echo off
+title FFmpeg Chrome Window Streaming
+echo ==========================================
+echo   Chrome Window Streaming to VPS
+echo ==========================================
+echo.
+echo Please make sure Chrome window is open
+echo VPS Server: 45.76.190.6
+echo Web Viewer: http://45.76.190.6
+echo.
+echo Starting Chrome window stream in 3 seconds...
+timeout /t 3 /nobreak > nul
+
+echo Starting FFmpeg streaming...
+ffmpeg -f gdigrab -framerate 30 -i title="Google Chrome" -c:v libx264 -preset veryfast -tune zerolatency -b:v 2M -maxrate 2M -bufsize 4M -f flv rtmp://45.76.190.6/live/stream
+
+echo.
+echo Stream ended. Press any key to exit...
+pause > nul
+
+═══════════════════════════════════════════════════════════════════════════════
+PHẦN 6: KIỂM TRA VÀ TROUBLESHOOTING
+═══════════════════════════════════════════════════════════════════════════════
+
+Bước 30: Kiểm tra stream trên VPS
+─────────────────────────────────────────────────────────────────────────────
+# SSH vào VPS và chạy:
+
+# Kiểm tra RTMP connections
+netstat -an | grep 1935
+
+# Kiểm tra HLS files được tạo
+ls -la /var/www/html/hls/
+
+# Theo dõi Nginx access log
+tail -f /var/log/nginx/access.log
+
+# Theo dõi Nginx error log
+tail -f /var/log/nginx/error.log
+
+Bước 31: Test web viewer
+─────────────────────────────────────────────────────────────────────────────
+1. Mở trình duyệt và truy cập: http://45.76.190.6
+2. Kết quả mong đợi: Trang web hiển thị với video player
+3. Nếu có stream, video sẽ tự động phát
+
+Bước 32: Troubleshooting phổ biến
+─────────────────────────────────────────────────────────────────────────────
+
+PROBLEM: FFmpeg báo lỗi "Connection refused"
+SOLUTION: 
+- Kiểm tra VPS có chạy Nginx không: systemctl status nginx
+- Kiểm tra port 1935 có mở không: netstat -tulpn | grep 1935
+- Kiểm tra firewall: ufw status
+
+PROBLEM: Web không hiển thị video
+SOLUTION:
+- Kiểm tra HLS files: ls -la /var/www/html/hls/
+- Kiểm tra Nginx error log: tail -f /var/log/nginx/error.log
+- Thử refresh trang web
+
+PROBLEM: Video bị lag hoặc chậm
+SOLUTION:
+- Giảm framerate: -framerate 15 thay vì 30
+- Giảm bitrate: -b:v 1M thay vì 2M
+- Đổi preset: -preset ultrafast
+
+PROBLEM: Không capture được Chrome window
+SOLUTION:
+- Thử title chính xác: ffmpeg -list_devices true -f dshow -i dummy (để xem danh sách)
+- Hoặc capture desktop: -i desktop
+- Hoặc capture vùng cụ thể: -offset_x 0 -offset_y 0 -video_size 1920x1080
+
+═══════════════════════════════════════════════════════════════════════════════
+PHẦN 7: TỐI ƯU HÓA HIỆU SUẤT
+═══════════════════════════════════════════════════════════════════════════════
+
+Bước 33: Tối ưu FFmpeg cho máy yếu
+─────────────────────────────────────────────────────────────────────────────
+# Cấu hình cho máy yếu (CPU thấp)
+ffmpeg -f gdigrab -framerate 15 -i desktop -c:v libx264 -preset ultrafast -tune zerolatency -b:v 1M -maxrate 1M -bufsize 2M -vf scale=1280:720 -f flv rtmp://45.76.190.6/live/stream
+
+Bước 34: Tối ưu FFmpeg cho máy mạnh
+─────────────────────────────────────────────────────────────────────────────
+# Cấu hình cho máy mạnh (CPU cao)
+ffmpeg -f gdigrab -framerate 60 -i desktop -c:v libx264 -preset medium -tune zerolatency -b:v 8M -maxrate 8M -bufsize 16M -vf scale=1920:1080 -f flv rtmp://45.76.190.6/live/stream
+
+Bước 35: Monitoring VPS performance
+─────────────────────────────────────────────────────────────────────────────
+# Theo dõi CPU và RAM usage
+htop
+
+# Theo dõi network traffic
+iftop
+
+# Theo dõi disk I/O
+iotop
+
+═══════════════════════════════════════════════════════════════════════════════
+TỔNG KẾT VÀ HƯỚNG DẪN SỬ DỤNG
+═══════════════════════════════════════════════════════════════════════════════
+
+🎯 QUY TRÌNH SỬ DỤNG HÀNG NGÀY:
+
+1. SSH vào VPS và chạy: systemctl start nginx
+2. Kiểm tra: systemctl status nginx
+3. Trên Windows, double-click file "stream_to_vps.bat"
+4. Mở browser và truy cập: http://45.76.190.6
+5. Enjoy streaming 30+ FPS!
+
+🚀 THÔNG SỐ ĐỀ XUẤT:
+
+Để có chất lượng tốt nhất:
+- Framerate: 30 FPS (hoặc 60 FPS nếu máy mạnh)
+- Bitrate: 2-5 Mbps
+- Resolution: 1920x1080 (hoặc 1280x720 nếu mạng chậm)
+- Preset: veryfast (cân bằng chất lượng/tốc độ)
+
+⚡ TỐI ƯU HIỆU SUẤT:
+
+- Dùng GPU encoding (NVENC/AMF) nếu có
+- Giảm framerate nếu máy yếu
+- Giảm bitrate nếu mạng chậm
+- Dùng preset ultrafast nếu CPU yếu
+
+🎥 KẾT QUẢ MONG ĐỢI:
+
+✅ Streaming mượt mà 30+ FPS
+✅ Độ trễ thấp (1-3 giây)
+✅ Chất lượng HD (1080p)
+✅ Nhiều người xem cùng lúc
+✅ Ổn định 24/7
+
+═══════════════════════════════════════════════════════════════════════════════
+HẾT HƯỚNG DẪN - CHÚC BẠN THÀNH CÔNG! 🎉
+═══════════════════════════════════════════════════════════════════════════════
